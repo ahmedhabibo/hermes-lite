@@ -1,0 +1,28 @@
+# ---- node ----
+node_modules/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ---- env / secrets (defense-in-depth) ----
+.env
+.env.local
+.env.*.local
+**/.env
+*.pem
+*.key
+
+# ---- big data / blobs ----
+*.db
+*.sqlite
+*.sqlite3
+.next/
+.archive/
+*.log
+__pycache__/
+.venv/
+venv/
+
+# ---- macOS ----
+.DS_Store

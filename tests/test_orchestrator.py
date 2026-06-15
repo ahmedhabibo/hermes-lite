@@ -1,0 +1,306 @@
+"""
+tests/test_orchestrator.py — E2E tests for the Hermes-Lite orchestrator.
+
+Tests cover:
+- HermesOrchestrator initialization and tool registration
+- PluginRegistry integration (tool dispatch via orchestrator)
+- SQLite memory integration (history persistence, session management)
+- Full integration: prompt → save → retrieve flow
+"""
+
+import json
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from hermes_lite.orchestrator import HermesOrchestrator
+from hermes_lite.registry import ToolDefinition
+from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def orchestrator(tmp_path):
+    """Create an orchestrator with a temporary database."""
+    db_path = str(tmp_path / "test_sessions.db")
+    orch = HermesOrchestrator(db_path=db_path, session_title="Test Session")
+    orch._create_default_tools()
+    await orch._initialize_memory()
+    yield orch
+    if orch.pool:
+        await orch.pool.close()
+
+
+@pytest.fixture
+def fresh_orch():
+    """Return a bare orchestrator without memory initialization (for init tests)."""
+    return HermesOrchestrator(db_path=":memory:", session_title="Init Test")
+
+
+# ---------------------------------------------------------------------------
+# Initialization tests
+# ---------------------------------------------------------------------------
+
+
+class TestOrchestratorInit:
+    def test_creates_default_tools(self, fresh_orch):
+        """Default tools (echo, calculator) should be registered."""
+        fresh_orch._create_default_tools()
+        assert fresh_orch.registry.tool_count == 2
+        assert fresh_orch.registry.has_tool("echo")
+        assert fresh_orch.registry.has_tool("calculator")
+
+    def test_get_tool_descriptions(self, fresh_orch):
+        """Tool descriptions should be properly formatted."""
+        fresh_orch._create_default_tools()
+        descs = fresh_orch.get_tool_descriptions()
+        assert len(descs) == 2
+        names = {d["name"] for d in descs}
+        assert names == {"echo", "calculator"}
+
+        echo_desc = next(d for d in descs if d["name"] == "echo")
+        assert "description" in echo_desc
+        assert "parameters" in echo_desc
+
+    def test_db_directory_created(self, tmp_path):
+        """DB parent directory should be created automatically."""
+        db_path = str(tmp_path / "nested" / "dir" / "sessions.db")
+        orch = HermesOrchestrator(db_path=db_path)
+        assert Path(db_path).parent.exists()
+
+
+# ---------------------------------------------------------------------------
+# Memory integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryIntegration:
+    async def test_memory_initialization(self, orchestrator):
+        """Orchestrator should create a valid session in the DB."""
+        assert orchestrator.session_id != ""
+        assert orchestrator.pool is not None
+        assert orchestrator.pool.size >= 1
+
+    async def test_save_and_retrieve_user_message(self, orchestrator):
+        """Messages should be persisted and retrievable."""
+        await orchestrator._save_message("user", "Hello, world!")
+        await orchestrator._save_message("assistant", "Hi there!")
+
+        history = await orchestrator._get_history(limit=10)
+        assert len(history) == 2
+        assert history[0]["role"] == "user"
+        assert history[0]["content"] == "Hello, world!"
+        assert history[1]["role"] == "assistant"
+        assert history[1]["content"] == "Hi there!"
+
+    async def test_message_order_preserved(self, orchestrator):
+        """Messages should maintain insertion order."""
+        for i in range(5):
+            await orchestrator._save_message("user", f"msg-{i}")
+
+        history = await orchestrator._get_history(limit=10)
+        contents = [m["content"] for m in history]
+        assert contents == [f"msg-{i}" for i in range(5)]
+
+    async def test_history_limit(self, orchestrator):
+        """History retrieval should respect the limit parameter."""
+        for i in range(10):
+            await orchestrator._save_message("user", f"msg-{i}")
+
+        history = await orchestrator._get_history(limit=3)
+        assert len(history) == 3
+
+    async def test_message_metadata(self, orchestrator):
+        """Message metadata should be persisted."""
+        await orchestrator._save_message(
+            "user", "test", metadata={"source": "cli", "tokens": 10}
+        )
+        history = await orchestrator._get_history()
+        assert history[0]["metadata"]["source"] == "cli"
+        assert history[0]["metadata"]["tokens"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Tool integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestToolIntegration:
+    async def test_echo_tool_registered(self, orchestrator):
+        """Echo tool should be registered and callable."""
+        assert orchestrator.registry.has_tool("echo")
+        result = orchestrator.registry.call_tool("echo", {"message": "hello"})
+        assert result == "hello"
+
+    async def test_calculator_tool(self, orchestrator):
+        """Calculator tool should evaluate expressions."""
+        assert orchestrator.registry.has_tool("calculator")
+        result = orchestrator.registry.call_tool("calculator", {"expression": "2 + 3"})
+        assert result == "5"
+
+    async def test_tool_not_found(self, orchestrator):
+        """Unknown tool should raise ToolNotFoundError."""
+        from hermes_lite.registry import ToolNotFoundError
+        with pytest.raises(ToolNotFoundError):
+            orchestrator.registry.call_tool("nonexistent", {})
+
+    async def test_tool_validation_error(self, orchestrator):
+        """Invalid tool arguments should raise ToolValidationError."""
+        from hermes_lite.registry import ToolValidationError
+        # calculator requires "expression" — missing should fail
+        with pytest.raises(ToolValidationError):
+            orchestrator.registry.call_tool("calculator", {})
+
+
+# ---------------------------------------------------------------------------
+# Prompt handling integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestPromptHandling:
+    async def test_prompt_saves_user_message(self, orchestrator):
+        """User prompt should be saved to memory."""
+        response = await orchestrator._handle_prompt("Hello!")
+        # Check message was saved
+        history = await orchestrator._get_history(limit=10)
+        user_msgs = [m for m in history if m["role"] == "user"]
+        assert len(user_msgs) >= 1
+        assert user_msgs[-1]["content"] == "Hello!"
+
+    async def test_prompt_saves_response(self, orchestrator):
+        """Assistant response should be saved to memory."""
+        response = await orchestrator._handle_prompt("Hello!")
+        history = await orchestrator._get_history(limit=10)
+        assistant_msgs = [m for m in history if m["role"] == "assistant"]
+        assert len(assistant_msgs) >= 1
+        assert assistant_msgs[-1]["content"] == response
+
+    async def test_tools_command_lists_tools(self, orchestrator):
+        """/tools command should list registered tools."""
+        response = await orchestrator._handle_prompt("/tools")
+        assert "echo" in response
+        assert "calculator" in response
+        assert "Echo the input" in response
+
+    async def test_help_command(self, orchestrator):
+        """/help command should show help text."""
+        response = await orchestrator._handle_prompt("/help")
+        assert "Hermes-Lite" in response or "Commands" in response
+        assert "!/" in response or "!tool" in response
+
+    async def test_history_command(self, orchestrator):
+        """Empty history should show appropriate message."""
+        response = await orchestrator._handle_prompt("/history")
+        assert "No conversation history" in response or "history" in response.lower()
+
+    async def test_history_with_messages(self, orchestrator):
+        """/history with prior messages should show them."""
+        await orchestrator._save_message("user", "first message")
+        response = await orchestrator._handle_prompt("/history")
+        assert "first message" in response or "first" in response
+
+    async def test_general_prompt_response(self, orchestrator):
+        """General prompts should mention available tools."""
+        response = await orchestrator._handle_prompt("What can you do?")
+        assert "tool" in response.lower()
+
+    async def test_direct_tool_invocation(self, orchestrator):
+        """Direct tool call syntax should invoke tools."""
+        response = await orchestrator._handle_prompt('!echo {"message": "hello world"}')
+        assert "Tool: echo" in response
+        assert "hello world" in response
+
+    async def test_direct_tool_invocation_no_args(self, orchestrator):
+        """Direct tool call with no args for a tool that needs them."""
+        response = await orchestrator._handle_prompt("!calculator")
+        assert "Tool error" in response or "error" in response.lower()
+
+    async def test_direct_tool_not_found(self, orchestrator):
+        """Direct tool call for unknown tool should show error."""
+        response = await orchestrator._handle_prompt('!unknown_tool {"x": 1}')
+        assert "Tool error" in response or "error" in response.lower() or "not found" in response.lower()
+
+
+# ---------------------------------------------------------------------------
+# Full integration flow
+# ---------------------------------------------------------------------------
+
+
+class TestFullIntegration:
+    async def test_conversation_flow(self, orchestrator):
+        """Simulate a full conversation with tool use."""
+        # First message
+        r1 = await orchestrator._handle_prompt("Hello!")
+        assert r1 is not None
+        assert len(r1) > 0
+
+        # Check history
+        h1 = await orchestrator._get_history()
+        assert len(h1) == 2  # user + assistant
+
+        # Second message
+        r2 = await orchestrator._handle_prompt("What tools do you have?")
+        assert "echo" in r2 or "calculator" in r2
+
+        # Third message — use /tools command
+        r3 = await orchestrator._handle_prompt("/tools")
+        assert len(r3) > 0
+
+        # Check all messages persisted
+        h3 = await orchestrator._get_history()
+        assert len(h3) == 6  # 3 exchanges = 6 messages
+
+    async def test_new_session_privacy(self, tmp_path):
+        """Different orchestrators with different DBs should have isolated sessions."""
+        orch1 = HermesOrchestrator(db_path=str(tmp_path / "db1.db"))
+        orch1._create_default_tools()
+        await orch1._initialize_memory()
+        await orch1._handle_prompt("Hello from orch1!")
+
+        orch2 = HermesOrchestrator(db_path=str(tmp_path / "db2.db"))
+        orch2._create_default_tools()
+        await orch2._initialize_memory()
+        await orch2._handle_prompt("Hello from orch2!")
+
+        # Each should have their own history
+        h1 = await orch1._get_history()
+        h2 = await orch2._get_history()
+
+        assert len(h1) == 2
+        assert len(h2) == 2
+        assert h1[0]["content"] == "Hello from orch1!"
+        assert h2[0]["content"] == "Hello from orch2!"
+
+        await orch1.pool.close()
+        await orch2.pool.close()
+
+    async def test_custom_tool_registration(self, orchestrator):
+        """Custom tools can be added to the orchestrator's registry."""
+        class GreetArgs(BaseModel):
+            name: str = Field(..., description="Name to greet")
+
+        def greet_handler(args: GreetArgs) -> str:
+            return f"Hello, {args.name}!"
+
+        tool_def = ToolDefinition(
+            name="greet",
+            description="Greet someone by name.",
+            schema_model=GreetArgs,
+            handler=greet_handler,
+        )
+        orchestrator.registry.add_tool(tool_def)
+        assert orchestrator.registry.tool_count == 3
+
+        # Test invocation
+        result = orchestrator.registry.call_tool("greet", {"name": "World"})
+        assert result == "Hello, World!"
+
+        # Test via CLI prompt
+        response = await orchestrator._handle_prompt('!greet {"name": "Orchestrator"}')
+        assert "Hello, Orchestrator" in response

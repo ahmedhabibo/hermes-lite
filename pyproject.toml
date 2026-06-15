@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-lite"
+version = "0.1.0"
+description = "Hermes Lite — lightweight agent framework with tool registry, SQLite memory, and orchestration"
+requires-python = ">=3.9"
+dependencies = [
+    "pydantic>=2.0",
+    "aiosqlite>=0.20.0",
+    "prompt-toolkit>=3.0.0",
+    "rich>=13.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["hermes_lite*"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+
+[tool.coverage.run]
+source = ["hermes_lite"]

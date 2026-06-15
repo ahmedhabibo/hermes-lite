@@ -1,0 +1,8 @@
+pyproject.toml
+hermes_lite.egg-info/PKG-INFO
+hermes_lite.egg-info/SOURCES.txt
+hermes_lite.egg-info/dependency_links.txt
+hermes_lite.egg-info/requires.txt
+hermes_lite.egg-info/top_level.txt
+tests/test_memory.py
+tests/test_registry.py
