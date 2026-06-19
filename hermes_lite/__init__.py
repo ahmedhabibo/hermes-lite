@@ -22,6 +22,36 @@ from hermes_lite.memory import (
 from hermes_lite.router import LiteRouter, RoutingDecision, parse_fallback_chain
 from hermes_lite.orchestrator import HermesOrchestrator
 from hermes_lite.cli import run_cli, PromptHandler
+from hermes_lite.tools_builtins import (
+    register_builtins,
+    ESSENTIAL_TOOL_NAMES,
+    ToolResult,
+    ReadFileArgs,
+    SearchFilesArgs,
+    TerminalArgs,
+    MemoryArgs,
+    WebSearchArgs,
+    WebFetchArgs,
+)
+from hermes_lite.observability import (
+    log_turn,
+    read_turns,
+    compute_stats,
+    print_stats,
+    DEFAULT_LOG_DIR,
+    DEFAULT_LOG_FILE,
+    MAX_LOG_BYTES,
+)
+from hermes_lite.subagent import (
+    SubagentArgs,
+    SubagentRunner,
+    register_subagent_tool,
+    SUBAGENT_TOOL_NAME,
+    SUBAGENT_MAX_TOOL_CALLS,
+    SUBAGENT_MAX_ITERATIONS,
+    SUBAGENT_WALL_TIMEOUT_S,
+    SUBAGENT_SYSTEM_PROMPT,
+)
 
 __all__ = [
     "PluginRegistry",
@@ -51,4 +81,31 @@ __all__ = [
     "HermesOrchestrator",
     "run_cli",
     "PromptHandler",
+    # 6 essentials
+    "register_builtins",
+    "ESSENTIAL_TOOL_NAMES",
+    "ToolResult",
+    "ReadFileArgs",
+    "SearchFilesArgs",
+    "TerminalArgs",
+    "MemoryArgs",
+    "WebSearchArgs",
+    "WebFetchArgs",
+    # Observability (T12)
+    "log_turn",
+    "read_turns",
+    "compute_stats",
+    "print_stats",
+    "DEFAULT_LOG_DIR",
+    "DEFAULT_LOG_FILE",
+    "MAX_LOG_BYTES",
+    # Subagent (T8)
+    "SubagentArgs",
+    "SubagentRunner",
+    "register_subagent_tool",
+    "SUBAGENT_TOOL_NAME",
+    "SUBAGENT_MAX_TOOL_CALLS",
+    "SUBAGENT_MAX_ITERATIONS",
+    "SUBAGENT_WALL_TIMEOUT_S",
+    "SUBAGENT_SYSTEM_PROMPT",
 ]

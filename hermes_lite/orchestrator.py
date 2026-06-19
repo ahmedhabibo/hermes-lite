@@ -625,6 +625,84 @@ class HermesOrchestrator:
                     lines.append(f"- **{label}**: {preview}")
                 response = "\n".join(lines)
 
+        elif prompt.lower().strip() == "/model":
+            chain = self.router.fallback_chain
+            preferred = chain[0] if chain else "(none)"
+            preferred_tier = "local" if preferred.startswith("local:") or "/" not in preferred else "cloud"
+            lines = [
+                "**Current Model:**\n",
+                f"- **Model**: `{preferred}`",
+                f"- **Tier**: {preferred_tier}",
+                f"- **Complexity threshold**: {self.router.local_max_complexity}",
+                f"- **Escalation after**: {self.router.escalate_after_failures} consecutive local failures",
+                f"- **Consecutive local failures**: {self.router.consecutive_local_failures}",
+                "",
+                "**Fallback Chain:**\n",
+            ]
+            for i, entry in enumerate(chain):
+                tier_label = "local" if entry.startswith("local:") or "/" not in entry else "cloud"
+                marker = " ← current" if i == 0 else ""
+                lines.append(f"  {i + 1}. `{entry}` ({tier_label}){marker}")
+            response = "\n".join(lines)
+
+        elif prompt.lower().strip() == "/stats":
+            history = await self._get_history(limit=10)
+            user_msgs = [m for m in history if m.get("role") == "user"]
+            asst_msgs = [m for m in history if m.get("role") == "assistant"]
+            if not user_msgs and not asst_msgs:
+                response = "No conversation turns yet."
+            else:
+                lines = ["**Last 10 Turns Summary:**\n"]
+                turn_num = 1
+                for m in history:
+                    if m.get("role") == "user":
+                        content = m.get("content", "")
+                        preview = content[:60] + ("..." if len(content) > 60 else "")
+                        lines.append(f"- **Turn {turn_num}:** You: {preview}")
+                        turn_num += 1
+                    elif m.get("role") == "assistant":
+                        content = m.get("content", "")
+                        preview = content[:60] + ("..." if len(content) > 60 else "")
+                        lines.append(f"  Hermes: {preview}")
+                lines.append(f"\n_Total: {len(user_msgs)} user, {len(asst_msgs)} assistant messages_")
+                response = "\n".join(lines)
+
+        elif prompt.lower().strip() == "/clear":
+            if self.pool is not None:
+                from hermes_lite.memory import delete_messages
+                deleted = await delete_messages(self.pool, self.session_id)
+                response = f"Conversation cleared ({deleted} messages removed). Cross-session memory preserved."
+            else:
+                self.session_id = uuid.uuid4().hex[:16]
+                response = "Conversation cleared. Cross-session memory preserved."
+
+        elif prompt.lower().strip() == "/memory":
+            try:
+                from hermes_lite.memory_bridge import get_default_bridge
+                bridge = get_default_bridge()
+                mem_entries = bridge.list("memory")
+                user_entries = bridge.list("user")
+                lines = ["**Memory:**\n"]
+                if mem_entries:
+                    lines.append(f"**Agent memory** ({len(mem_entries)} entries):")
+                    for e in mem_entries[:10]:
+                        lines.append(f"  - {e.content[:80]}")
+                    if len(mem_entries) > 10:
+                        lines.append(f"  _...and {len(mem_entries) - 10} more_")
+                else:
+                    lines.append("**Agent memory**: (none)")
+                if user_entries:
+                    lines.append(f"\n**User profile** ({len(user_entries)} entries):")
+                    for e in user_entries[:10]:
+                        lines.append(f"  - {e.content[:80]}")
+                    if len(user_entries) > 10:
+                        lines.append(f"  _...and {len(user_entries) - 10} more_")
+                else:
+                    lines.append("\n**User profile**: (none)")
+                response = "\n".join(lines)
+            except Exception as exc:
+                response = f"**Memory**: Unable to load memory bridge ({exc})"
+
         elif prompt.lower().strip() == "/help":
             response = (
                 "**Hermes-Lite Commands**\n\n"
@@ -633,11 +711,16 @@ class HermesOrchestrator:
                 "  `!tool_name {\"arg\": \"value\"}` — Call a registered tool directly\n\n"
                 "**Commands:**\n"
                 "  `/tools` — List registered tools and their schemas\n"
+                "  `/model` — Show current model and fallback chain\n"
+                "  `/stats` — Show last 10 turns summary\n"
+                "  `/clear` — Reset conversation (keeps memory)\n"
+                "  `/memory` — Show what's loaded into context\n"
                 "  `/history` — View recent conversation history\n"
                 "  `/help` — Show this help message\n"
                 "  `/exit`, `/quit`, `/q` — Exit the CLI\n"
                 "  `Ctrl+C` or `Ctrl+D` — Exit the CLI"
             )
+
 
         else:
             # General prompt — run the ToolLoop with the LLM
@@ -701,20 +784,26 @@ class HermesOrchestrator:
                 errors=_obs.get("errors", []),
             )
 
+        # For /clear we intentionally skip saving the assistant response
+        # so the conversation history is truly empty after clearing.
+        _skip_save = prompt.lower().strip() == "/clear"
+
         # Save assistant response — embed routing decision and tool
         # outcome so downstream workers (and the test suite) can verify
         # both.
-        await self._save_message(
-            "assistant",
-            response,
-            metadata={
-                "tool_called": tool_result is not None,
-                "routing": routing_meta,
-            },
-        )
+        if not _skip_save:
+            await self._save_message(
+                "assistant",
+                response,
+                metadata={
+                    "tool_called": tool_result is not None,
+                    "routing": routing_meta,
+                },
+            )
         # For direct-tool and command paths, record a generic success
         # into the router (no real LLM call).
-        if not prompt.startswith("!") and prompt.lower().strip() not in ("/tools", "/history", "/help"):
+        _command_set = ("/tools", "/history", "/help", "/model", "/stats", "/memory", "/clear")
+        if not prompt.startswith("!") and prompt.lower().strip() not in _command_set:
             pass  # already recorded above in the else branch
         else:
             self.router.record_outcome(decision, succeeded=True, tool_calls_malformed=False)

@@ -313,5 +313,5 @@ def _echo_handler(prompt: str) -> str:
 if __name__ == "__main__":
     run_cli(
         on_prompt=_echo_handler,
-        welcome_message="Hermes-Lite v0.1 Demo — type anything (echo mode).",
+        welcome_message="Hermes-Lite v0.2 — type anything to chat. Use /help for commands.",
     )

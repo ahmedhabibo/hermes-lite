@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-lite"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hermes Lite — lightweight agent framework with tool registry, SQLite memory, and orchestration"
 requires-python = ">=3.9"
 dependencies = [

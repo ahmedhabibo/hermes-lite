@@ -20,7 +20,7 @@ import uuid
 
 import pytest
 
-from memory import (
+from hermes_lite.memory import (
     AsyncSQLitePool,
     SCHEMA_VERSION,
     ensure_schema,
