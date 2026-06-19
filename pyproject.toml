@@ -29,6 +29,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
+markers = [
+    "slow: marks tests that may exceed a few seconds (deselected with '-m \"not slow\"')",
+]
 
 [tool.coverage.run]
 source = ["hermes_lite"]
