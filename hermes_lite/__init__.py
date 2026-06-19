@@ -19,6 +19,7 @@ from hermes_lite.memory import (
     delete_metadata,
     session_context,
 )
+from hermes_lite.router import LiteRouter, RoutingDecision, parse_fallback_chain
 from hermes_lite.orchestrator import HermesOrchestrator
 from hermes_lite.cli import run_cli, PromptHandler
 
@@ -44,6 +45,9 @@ __all__ = [
     "list_metadata",
     "delete_metadata",
     "session_context",
+    "LiteRouter",
+    "RoutingDecision",
+    "parse_fallback_chain",
     "HermesOrchestrator",
     "run_cli",
     "PromptHandler",

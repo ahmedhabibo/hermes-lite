@@ -38,6 +38,7 @@ from hermes_lite.memory import (
     get_session,
 )
 from hermes_lite.cli import run_cli
+from hermes_lite.router import LiteRouter, RoutingDecision
 
 # ---------------------------------------------------------------------------
 # Built-in tool schemas
@@ -121,12 +122,19 @@ class HermesOrchestrator:
         self,
         db_path: str | Path = "~/.hermes_lite/sessions.db",
         session_title: str = "Hermes-Lite Session",
+        router: LiteRouter | None = None,
     ) -> None:
         self.db_path = str(Path(db_path).expanduser())
         self.session_title = session_title
         self.session_id: str = ""
         self.pool: AsyncSQLitePool | None = None
         self.registry = PluginRegistry(strict_validation=True)
+        # Routing controller picks local vs cloud before any LLM call.
+        # None means "construct a default LiteRouter inside handle_prompt"
+        # so existing tests that don't care about routing keep working,
+        # but consumers who want to override thresholds/fallback chain
+        # can pass their own.
+        self.router: LiteRouter = router or LiteRouter()
 
         # Ensure parent directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -202,17 +210,56 @@ class HermesOrchestrator:
             metadata=metadata,
         )
 
+    async def _route_decision(self, prompt: str) -> RoutingDecision:
+        """Compute a routing decision for ``prompt``.
+
+        Counts the user's recent history as ``history_turns`` and a
+        rough prompt-length-based token estimate for ``context_tokens``
+        so the router has realistic signals to work with. The decision
+        is purely advisory here — the orchestrator records it on the
+        assistant message so users (and downstream tests) can see the
+        chosen tier, but no real LLM call is made yet (the LLM wiring
+        lives in T4/T6).
+        """
+        history = await self._get_history(limit=20)
+        history_turns = sum(1 for m in history if m.get("role") in {"user", "assistant"})
+        # Coarse context token estimate: ~4 chars/token. Cheap, good
+        # enough to drive the router.
+        full_text = "\n".join(
+            str(m.get("content") or "")
+            for m in history
+            if m.get("role") in {"user", "assistant"}
+        )
+        context_tokens = len(full_text) // 4
+        return self.router.route(prompt, context_tokens, history_turns)
+
     async def _handle_prompt(self, prompt: str) -> str:
         """Process a user prompt: check for tool calls, generate response.
 
         This implementation:
         1. Saves the user prompt to memory
-        2. Checks if the prompt matches a built-in tool (tool_call prefix)
-        3. Otherwise returns a simple acknowledgement
-        4. Saves the response to memory
+        2. Asks the routing controller which tier to use, records it on
+           the assistant message metadata for transparency
+        3. Checks if the prompt matches a built-in tool (tool_call prefix)
+        4. Otherwise returns a simple acknowledgement (LLM chat wiring
+           ships in T4 / T6)
+        5. Records any LLM outcome (success/failure/malformed tool_calls)
+           back onto the router so the next escalation check is informed
         """
         # Save user message
         await self._save_message("user", prompt)
+
+        # Decide which tier/model this prompt should run against. Done
+        # up-front so the rest of the prompt pipeline can use the
+        # routing decision as metadata.
+        decision = await self._route_decision(prompt)
+        routing_meta = {
+            "model_id": decision.model_id,
+            "tier": decision.tier,
+            "complexity_score": round(decision.complexity_score, 4),
+            "reason": decision.reason,
+            "fell_back": decision.fell_back,
+        }
 
         # Check for direct tool invocation (tool_name: json_args format)
         tool_result = None
@@ -281,17 +328,37 @@ class HermesOrchestrator:
                 )
 
             else:
-                # General response — include available tools info
+                # General response — include available tools info plus
+                # a routing-transparency line so the user (and tests)
+                # can see which tier was chosen.
+                tier_emoji = "⚡" if decision.tier == "local" else "☁️ "
                 descs = self.get_tool_descriptions()
                 tool_list = ", ".join(f"`{d['name']}`" for d in descs) if descs else "none registered"
                 response = (
+                    f"{tier_emoji} using **{decision.tier}** model `{decision.model_id}` "
+                    f"(score {decision.complexity_score:.2f})\n\n"
                     f"I'm running with **{self.registry.tool_count} tool(s)** registered: {tool_list}\n\n"
                     f"You said: _{prompt}_\n\n"
+                    f"_Routing: {decision.reason}_\n\n"
                     f"*Use `!tool_name {{...}}` to invoke a tool directly, or `/tools` to see available tools.*"
                 )
 
-        # Save assistant response
-        await self._save_message("assistant", response, metadata={"tool_called": tool_result is not None})
+        # Save assistant response — embed routing decision and tool
+        # outcome so downstream workers (and the test suite) can verify
+        # both.
+        await self._save_message(
+            "assistant",
+            response,
+            metadata={
+                "tool_called": tool_result is not None,
+                "routing": routing_meta,
+            },
+        )
+        # Feed the booking-keeping back into the router so escalation
+        # state is correct. Tool invocations and general responses are
+        # both counted as a "success" right now (no real LLM call yet);
+        # T4/T6 will swap this for an actual model outcome.
+        self.router.record_outcome(decision, succeeded=True, tool_calls_malformed=False)
         return response
 
     def start(self) -> None:

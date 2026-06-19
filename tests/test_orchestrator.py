@@ -304,3 +304,91 @@ class TestFullIntegration:
         # Test via CLI prompt
         response = await orchestrator._handle_prompt('!greet {"name": "Orchestrator"}')
         assert "Hello, Orchestrator" in response
+
+
+# ---------------------------------------------------------------------------
+# Routing controller integration
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingIntegration:
+    """End-to-end checks that the orchestrator actually consults the
+    LiteRouter before responding — covers the spec's step 5
+    (Wire into orchestrator: handle_prompt calls router.route() before
+    llm.chat()).
+    """
+
+    async def _last_routing(self, orchestrator) -> dict:
+        history = await orchestrator._get_history(limit=5)
+        # Newest assistant message carries the routing metadata blob.
+        for msg in reversed(history):
+            if msg.get("role") == "assistant":
+                meta = msg.get("metadata") or {}
+                routing = meta.get("routing")
+                if routing:
+                    return routing
+        return {}
+
+    async def test_simple_prompt_records_local_tier(self, orchestrator):
+        """A trivial 'find X' prompt must record tier=local."""
+        await orchestrator._handle_prompt("find customer_id 42")
+        routing = await self._last_routing(orchestrator)
+        assert routing.get("tier") == "local"
+        assert routing.get("model_id", "").startswith("local:")
+
+    async def test_refactor_prompt_records_cloud_tier(self, orchestrator):
+        """Acceptance: 'refactor this 200-line script' must record cloud."""
+        await orchestrator._handle_prompt("refactor this 200-line script")
+        routing = await self._last_routing(orchestrator)
+        assert routing.get("tier") == "cloud"
+        # Cloud model id should NOT start with local:
+        assert not routing.get("model_id", "").startswith("local:")
+
+    async def test_transparency_emoji_in_response(self, orchestrator):
+        """The general-response path surfaces the chosen tier to users."""
+        response = await orchestrator._handle_prompt("find invoice 7")
+        # ⚡ for local, ☁️ for cloud — at least one must appear.
+        assert ("⚡" in response) or ("☁️" in response)
+        assert "local" in response or "cloud" in response
+
+    async def test_success_resets_escalation_counter(self, orchestrator):
+        """Each successful prompt trips record_outcome(); counter must
+        stay at zero on a fresh default router."""
+        # Force two failures on the controller
+        decision = orchestrator.router.route("hi", 0, 0)
+        orchestrator.router.record_outcome(decision, succeeded=False)
+        orchestrator.router.record_outcome(decision, succeeded=False)
+
+        # Then a successful prompt must reset the counter.
+        await orchestrator._handle_prompt("find invoice 5")
+        assert orchestrator.router.consecutive_local_failures == 0
+
+    async def test_router_override(self, tmp_path):
+        """A custom router passed at construction is honoured."""
+        from hermes_lite.router import LiteRouter
+
+        custom = LiteRouter(
+            fallback_chain=["local:custom-only"],
+            local_max_complexity=0.05,  # aggressively cloud
+        )
+        orch = HermesOrchestrator(
+            db_path=str(tmp_path / "routing.db"),
+            router=custom,
+        )
+        orch._create_default_tools()
+        await orch._initialize_memory()
+        try:
+            response = await orch._handle_prompt("hello")
+            # Even a trivial prompt should escalate under the aggressive
+            # threshold (0.05) — there's tiny prompt contribution.
+            history = await orch._get_history(limit=5)
+            routing_meta = next(
+                m.get("metadata", {}).get("routing", {})
+                for m in reversed(history)
+                if m.get("role") == "assistant" and m.get("metadata", {}).get("routing")
+            )
+            assert routing_meta["tier"] == "cloud"
+            assert response  # smoke check — non-empty
+        finally:
+            if orch.pool:
+                await orch.pool.close()
