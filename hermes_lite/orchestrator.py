@@ -2,9 +2,10 @@
 hermes_lite/orchestrator.py — Orchestrator Engine
 
 Wires the PluginRegistry (tools), SQLite memory layer (conversation history),
-and CLI shell into a working agent loop.
+LLM client, and CLI shell into a working agent loop.
 
 Key components:
+- ToolLoop: Two-tier tool-calling loop with termination guards
 - HermesOrchestrator: Coordinates tool registry + memory + prompt handling
 - register_builtins(): Populates the registry with default built-in tools
 """
@@ -13,11 +14,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from pydantic import BaseModel, Field
+from dataclasses import dataclass, field
 
 from hermes_lite.registry import (
     PluginRegistry,
@@ -37,71 +40,381 @@ from hermes_lite.memory import (
     create_session,
     get_session,
 )
+from hermes_lite.llm import ChatRequest, ChatResponse, chat, tool_def, Tier
 from hermes_lite.cli import run_cli
 from hermes_lite.router import LiteRouter, RoutingDecision
-
-# ---------------------------------------------------------------------------
-# Built-in tool schemas
-# ---------------------------------------------------------------------------
-
-
-class EchoArgs(BaseModel):
-    """Echo the input back to the user (useful for testing)."""
-    message: str = Field(..., description="The message to echo back.")
-
-
-class CalculatorArgs(BaseModel):
-    """Evaluate a simple arithmetic expression."""
-    expression: str = Field(..., description="Arithmetic expression to evaluate (e.g. '2 + 2').")
-
-
-class SaveNoteArgs(BaseModel):
-    """Save a note in the session's metadata store."""
-    key: str = Field(..., description="Note key/name.")
-    content: str = Field(..., description="Note content.")
-
-
-class GetNoteArgs(BaseModel):
-    """Retrieve a saved note from the session's metadata store."""
-    key: str = Field(..., description="Note key/name.")
-
-
-class ListNotesArgs(BaseModel):
-    """List all saved notes for this session."""
+from hermes_lite.tools_builtins import register_builtins as _register_essentials
+from hermes_lite.observability import log_turn
 
 
 # ---------------------------------------------------------------------------
-# Built-in handlers
+# Built-in tools are now provided by :mod:`hermes_lite.tools_builtins`.
+# The 6 essentials (``read_file``, ``search_files``, ``terminal``,
+# ``memory``, ``web_search``, ``web_fetch``) are the only tools the
+# orchestrator registers by default. The previous ``echo`` /
+# ``calculator`` / ``save_note`` set has been retired.
 # ---------------------------------------------------------------------------
 
 
-def _handle_echo(args: EchoArgs) -> str:
-    return args.message
+# ---------------------------------------------------------------------------
+# Tool Loop — the two-tier tool-calling loop (T6)
+# ---------------------------------------------------------------------------
 
 
-def _handle_calculator(args: CalculatorArgs) -> str:
-    try:
-        # Safe evaluation — only allow numbers, operators, parens, spaces
-        expr = args.expression.strip()
-        allowed = set("0123456789+-*/(). ")
-        if not all(c in allowed for c in expr):
-            return f"Error: Expression contains disallowed characters."
-        result = eval(expr, {"__builtins__": {}}, {})
-        return str(result)
-    except Exception as exc:
-        return f"Error evaluating expression: {exc}"
+@dataclass
+class ToolLoopResult:
+    """Outcome of a ToolLoop run — fed back to the orchestrator."""
+
+    response: str
+    """Final text to show the user."""
+
+    iterations: int
+    """How many LLM round-trips the loop took."""
+
+    tool_calls_made: int
+    """Total tool invocations across all iterations."""
+
+    tool_names: list[str]
+    """Names of every tool called, in order."""
+
+    terminated_by: str
+    """Why the loop stopped: 'complete', 'max_iterations', 'repeated_error', 'malformed_tool_call'."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Extra structured data for persistence (routing, model, etc.)."""
 
 
-def _build_note_handler(registry: PluginRegistry, session_id: str):
-    """Build handlers that close over the registry and session_id.
+class ToolLoop:
+    """Two-tier tool-calling loop with termination guards.
 
-    Returns a dict of {'handle_save': ..., 'handle_get': ..., 'handle_list': ...}
-    that the orchestrator will invoke directly (not through the tool registry,
-    since these tools need access to the memory layer).
+    The loop drives an LLM through multiple rounds of tool invocation:
+    1. Send messages + tool defs to the LLM
+    2. If the LLM responds with ``tool_calls``, validate + dispatch each one
+    3. Append tool results to the conversation history
+    4. Re-invoke the LLM with the updated history
+    5. Repeat until the LLM returns a plain text response, or a termination
+       condition fires.
+
+    Termination conditions:
+    - **complete**: LLM returned a response with no ``tool_calls``
+    - **max_iterations**: exceeded ``max_iterations`` (default 4)
+    - **repeated_error**: the same tool produced the same error on 2
+      consecutive iterations
+    - **malformed_tool_call**: the LLM produced a tool call with invalid
+      JSON arguments, and a single retry nudge also produced bad JSON
+
+    Parameters
+    ----------
+    registry:
+        Tool registry for validation and dispatch.
+    chat_fn:
+        Async callable ``(ChatRequest) -> ChatResponse`` — normally
+        :func:`hermes_lite.llm.chat`, but injectable for testing.
+    max_iterations:
+        Hard cap on LLM round-trips. Default 4.
+    on_tool_call:
+        Optional callback invoked each time a tool is about to execute.
+        Receives ``(tool_name, first_arg_value)`` so the caller can print
+        a ⚡ progress line to the terminal.
     """
-    # These are wired through the orchestrator's _call_tool method which
-    # has access to the memory pool and session_id — see HermesOrchestrator.
-    pass
+
+    def __init__(
+        self,
+        registry: PluginRegistry,
+        chat_fn: Callable[[ChatRequest], Any] = chat,
+        max_iterations: int = 4,
+        on_tool_call: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self.registry = registry
+        self.chat_fn = chat_fn
+        self.max_iterations = max_iterations
+        self.on_tool_call = on_tool_call
+
+    # -- public entry -----------------------------------------------------
+
+    async def run(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        *,
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+    ) -> ToolLoopResult:
+        """Execute the tool-calling loop.
+
+        Parameters
+        ----------
+        messages:
+            Conversation history so far (will be copied; not mutated in-place).
+        model:
+            Model identifier accepted by :func:`hermes_lite.llm.chat`.
+        temperature:
+            Sampling temperature for every LLM call in the loop.
+        max_tokens:
+            Token budget per LLM call.
+
+        Returns
+        -------
+        ToolLoopResult
+            Summary of the loop outcome for the orchestrator to persist
+            and display.
+        """
+        history = list(messages)
+        tools = self._build_openai_tools()
+        iterations = 0
+        total_tool_calls = 0
+        all_tool_names: list[str] = []
+        last_error_key: tuple[str, str] | None = None
+        # Track whether we've already issued a JSON-nudge retry.
+        nudged_json = False
+        # Observability accumulators
+        turn_start_ms = int(time.monotonic() * 1000)
+        cumulative_prompt_tokens = 0
+        cumulative_completion_tokens = 0
+        turn_errors: list[str] = []
+
+        while iterations < self.max_iterations:
+            iterations += 1
+            req = ChatRequest(
+                messages=history,
+                model=model,
+                tools=tools,
+                tool_choice="auto",
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            resp: ChatResponse = await self.chat_fn(req)
+
+            # Accumulate token usage (observability T12)
+            cumulative_prompt_tokens += resp.usage.get("prompt_tokens", 0)
+            cumulative_completion_tokens += resp.usage.get("completion_tokens", 0)
+
+            # -- No tool calls → LLM is done talking ---------------
+            if not resp.tool_calls:
+                elapsed_ms = int((time.monotonic() * 1000) - turn_start_ms)
+                return ToolLoopResult(
+                    response=resp.content or "",
+                    iterations=iterations,
+                    tool_calls_made=total_tool_calls,
+                    tool_names=all_tool_names,
+                    terminated_by="complete",
+                    metadata={
+                        "model": model,
+                        "tier": resp.tier,
+                        "_obs": {
+                            "elapsed_ms": elapsed_ms,
+                            "prompt_tokens": cumulative_prompt_tokens,
+                            "completion_tokens": cumulative_completion_tokens,
+                            "errors": turn_errors,
+                        },
+                    },
+                )
+
+            # -- Process each tool call ----------------------------
+            # Append the assistant's tool-calling message to history
+            assistant_msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": resp.content or None,
+            }
+            if resp.tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"],
+                        },
+                    }
+                    for tc in resp.tool_calls
+                ]
+            history.append(assistant_msg)
+
+            any_malformed = False
+
+            for tc in resp.tool_calls:
+                tc_id = tc.get("id", "")
+                tc_name = tc.get("name", "")
+                tc_args_str = tc.get("arguments", "{}")
+                total_tool_calls += 1
+                all_tool_names.append(tc_name)
+
+                # Extract first arg value for the streaming callback
+                first_arg = self._extract_first_arg(tc_args_str)
+
+                # -- Validate + dispatch ---------------------------
+                result_content: str
+                try:
+                    args = json.loads(tc_args_str)
+                except json.JSONDecodeError:
+                    # Malformed JSON — nudge once, then break
+                    any_malformed = True
+                    if not nudged_json:
+                        nudged_json = True
+                        result_content = (
+                            "Error: your tool call arguments were not valid JSON. "
+                            "Please respond with strict JSON arguments only — "
+                            "no comments, no trailing commas."
+                        )
+                    else:
+                        # Second malformed call — terminate
+                        result_content = (
+                            "Error: repeated malformed JSON in tool call arguments. "
+                            "Stopping."
+                        )
+                        history.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": result_content,
+                        })
+                        elapsed_ms = int((time.monotonic() * 1000) - turn_start_ms)
+                        turn_errors.append("malformed JSON in tool call")
+                        return ToolLoopResult(
+                            response="I encountered repeated errors formatting tool calls. Please try rephrasing your request.",
+                            iterations=iterations,
+                            tool_calls_made=total_tool_calls,
+                            tool_names=all_tool_names,
+                            terminated_by="malformed_tool_call",
+                            metadata={
+                                "model": model,
+                                "tier": resp.tier,
+                                "_obs": {
+                                    "elapsed_ms": elapsed_ms,
+                                    "prompt_tokens": cumulative_prompt_tokens,
+                                    "completion_tokens": cumulative_completion_tokens,
+                                    "errors": turn_errors,
+                                },
+                            },
+                        )
+                else:
+                    # Valid JSON — validate against registry and dispatch
+                    # Fire the streaming callback
+                    if self.on_tool_call:
+                        self.on_tool_call(tc_name, first_arg)
+
+                    try:
+                        raw = self.registry.call_tool(tc_name, args)
+                        if isinstance(raw, dict) and raw.get("ok"):
+                            result_content = raw.get("output", "")
+                        elif isinstance(raw, dict) and not raw.get("ok"):
+                            err = raw.get("error", "unknown error")
+                            result_content = f"Tool error: {err}"
+                        else:
+                            result_content = str(raw)
+                    except ToolNotFoundError:
+                        result_content = f"Tool error: '{tc_name}' is not a registered tool."
+                        turn_errors.append(f"{tc_name}: not registered")
+                    except ToolValidationError as exc:
+                        result_content = f"Tool error: validation failed — {exc}"
+                        turn_errors.append(f"{tc_name}: validation failed")
+                    except ToolError as exc:
+                        result_content = f"Tool error: {exc}"
+                        turn_errors.append(f"{tc_name}: {exc}")
+                    except Exception as exc:
+                        result_content = f"Tool error: unexpected {type(exc).__name__}: {exc}"
+                        turn_errors.append(f"{tc_name}: {type(exc).__name__}")
+
+                    # Repeated-error detection: (tool_name, error_prefix)
+                    # Surface the same tool+error twice → break
+                    if result_content.startswith("Tool error:"):
+                        error_key = (tc_name, result_content[:80])
+                        if error_key == last_error_key:
+                            history.append({
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": result_content,
+                            })
+                            elapsed_ms = int((time.monotonic() * 1000) - turn_start_ms)
+                            turn_errors.append(f"{tc_name}: repeated error")
+                            return ToolLoopResult(
+                                response=f"I hit a repeated error with the `{tc_name}` tool and stopped. Last error: {result_content}",
+                                iterations=iterations,
+                                tool_calls_made=total_tool_calls,
+                                tool_names=all_tool_names,
+                                terminated_by="repeated_error",
+                                metadata={
+                                    "model": model,
+                                    "tier": resp.tier,
+                                    "repeated_error_tool": tc_name,
+                                    "_obs": {
+                                        "elapsed_ms": elapsed_ms,
+                                        "prompt_tokens": cumulative_prompt_tokens,
+                                        "completion_tokens": cumulative_completion_tokens,
+                                        "errors": turn_errors,
+                                    },
+                                },
+                            )
+                        last_error_key = error_key
+                    else:
+                        last_error_key = None
+
+                # Append tool result to history
+                history.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result_content,
+                })
+
+            # If any tool call had malformed JSON but we didn't break
+            # (first nudge), continue the loop so the LLM can retry.
+            if any_malformed:
+                continue
+
+        # -- max_iterations exhausted ----------------------------
+        elapsed_ms = int((time.monotonic() * 1000) - turn_start_ms)
+        return ToolLoopResult(
+            response=(
+                f"I reached the maximum number of reasoning steps ({self.max_iterations}) "
+                f"and stopped. Here is what I have so far:\n\n"
+                + "[no partial response]"
+            ),
+            iterations=iterations,
+            tool_calls_made=total_tool_calls,
+            tool_names=all_tool_names,
+            terminated_by="max_iterations",
+            metadata={
+                "model": model,
+                "tier": "local",
+                "_obs": {
+                    "elapsed_ms": elapsed_ms,
+                    "prompt_tokens": cumulative_prompt_tokens,
+                    "completion_tokens": cumulative_completion_tokens,
+                    "errors": turn_errors,
+                },
+            },
+        )
+
+    # -- helpers ----------------------------------------------------------
+
+    def _build_openai_tools(self) -> list[dict[str, Any]]:
+        """Build the ``tools`` payload for the OpenAI chat API from the registry."""
+        result = []
+        for desc in self.registry.tool_descriptions():
+            result.append(tool_def(
+                name=desc["name"],
+                description=desc["description"],
+                parameters=desc.get("parameters", {"type": "object", "properties": {}}),
+            ))
+        return result
+
+    @staticmethod
+    def _extract_first_arg(args_str: str) -> str:
+        """Try to pull the first argument value out of a JSON args string.
+
+        Used for the streaming callback so the user sees something like
+        ``⚡ read_file("README.md")``.
+        """
+        try:
+            obj = json.loads(args_str)
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    if isinstance(v, str):
+                        return v
+                    return str(v)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Best-effort: return the raw string, truncated
+        return args_str[:60]
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +436,7 @@ class HermesOrchestrator:
         db_path: str | Path = "~/.hermes_lite/sessions.db",
         session_title: str = "Hermes-Lite Session",
         router: LiteRouter | None = None,
+        tool_loop: ToolLoop | None = None,
     ) -> None:
         self.db_path = str(Path(db_path).expanduser())
         self.session_title = session_title
@@ -135,32 +449,35 @@ class HermesOrchestrator:
         # but consumers who want to override thresholds/fallback chain
         # can pass their own.
         self.router: LiteRouter = router or LiteRouter()
+        # ToolLoop — set up lazily in start() after tools are registered.
+        # Accept an override for testing.
+        self._tool_loop: ToolLoop | None = tool_loop
 
         # Ensure parent directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _create_default_tools(self) -> None:
-        """Register the built-in tools."""
-        tools = [
-            ToolDefinition(
-                name="echo",
-                description="Echo the input back to the user. Use for testing connectivity.",
-                schema_model=EchoArgs,
-                handler=_handle_echo,
-            ),
-            ToolDefinition(
-                name="calculator",
-                description="Evaluate a simple arithmetic expression.",
-                schema_model=CalculatorArgs,
-                handler=_handle_calculator,
-            ),
-        ]
+        """Register the 6 essential tools via hermes_lite.tools_builtins."""
+        _register_essentials(self.registry)
 
-        for tool in tools:
-            try:
-                self.registry.add_tool(tool)
-            except ValueError:
-                pass  # already registered
+    @property
+    def tool_loop(self) -> ToolLoop:
+        """Lazy-accessor: builds the ToolLoop on first use if not injected."""
+        if self._tool_loop is None:
+            self._tool_loop = ToolLoop(
+                registry=self.registry,
+                on_tool_call=self._print_tool_progress,
+            )
+        return self._tool_loop
+
+    @staticmethod
+    def _print_tool_progress(tool_name: str, first_arg: str) -> None:
+        """Print a bolt-icon progress line to stderr for streaming."""
+        preview = first_arg[:50] if first_arg else ""
+        if preview:
+            print(f"⚡ {tool_name}({preview!r})", file=sys.stderr)
+        else:
+            print(f"⚡ {tool_name}(...)", file=sys.stderr)
 
     def get_tool_descriptions(self) -> list[dict[str, Any]]:
         """Return tool descriptions formatted for the prompt."""
@@ -234,24 +551,21 @@ class HermesOrchestrator:
         return self.router.route(prompt, context_tokens, history_turns)
 
     async def _handle_prompt(self, prompt: str) -> str:
-        """Process a user prompt: check for tool calls, generate response.
+        """Process a user prompt: route, run tool loop, persist turn.
 
-        This implementation:
-        1. Saves the user prompt to memory
-        2. Asks the routing controller which tier to use, records it on
-           the assistant message metadata for transparency
-        3. Checks if the prompt matches a built-in tool (tool_call prefix)
-        4. Otherwise returns a simple acknowledgement (LLM chat wiring
-           ships in T4 / T6)
-        5. Records any LLM outcome (success/failure/malformed tool_calls)
-           back onto the router so the next escalation check is informed
+        Flow:
+        1. Save the user message to memory
+        2. Route to local or cloud tier
+        3. Handle special commands (!tool, /tools, /history, /help)
+        4. For general prompts, build conversation history and run the
+           ToolLoop against the LLM
+        5. Persist the assistant response
+        6. Feed the outcome back into the router for escalation tracking
         """
         # Save user message
         await self._save_message("user", prompt)
 
-        # Decide which tier/model this prompt should run against. Done
-        # up-front so the rest of the prompt pipeline can use the
-        # routing decision as metadata.
+        # Decide which tier/model this prompt should run against.
         decision = await self._route_decision(prompt)
         routing_meta = {
             "model_id": decision.model_id,
@@ -261,7 +575,7 @@ class HermesOrchestrator:
             "fell_back": decision.fell_back,
         }
 
-        # Check for direct tool invocation (tool_name: json_args format)
+        # Check for direct tool invocation (tool_call prefix)
         tool_result = None
         if prompt.startswith("!"):
             # Direct tool call syntax: !tool_name {"arg": "value"}
@@ -279,69 +593,113 @@ class HermesOrchestrator:
                 response = f"**Tool: {tool_name}**\n\nResult: {tool_result}"
             except (ToolNotFoundError, ToolValidationError, ToolError, json.JSONDecodeError) as exc:
                 response = f"**Tool error:** {exc}"
-        else:
-            # Check for system/internal commands
-            cmd = prompt.lower().strip()
 
-            if cmd == "/tools":
-                descs = self.get_tool_descriptions()
-                if not descs:
-                    response = "No tools registered."
-                else:
-                    lines = ["**Available Tools:**\n"]
-                    for d in descs:
-                        lines.append(f"- **{d['name']}**: {d['description']}")
-                        if d.get("parameters"):
-                            props = d["parameters"].get("properties", {})
-                            for pname, pinfo in props.items():
-                                required = pname in d["parameters"].get("required", [])
-                                req_mark = " (required)" if required else ""
-                                lines.append(f"  - `{pname}`: {pinfo.get('description', '')}{req_mark}")
-                    response = "\n".join(lines)
-
-            elif cmd == "/history":
-                history = await self._get_history(limit=10)
-                if not history:
-                    response = "No conversation history."
-                else:
-                    lines = ["**Recent History:**\n"]
-                    for msg in history:
-                        label = "You" if msg["role"] == "user" else "Hermes"
-                        preview = msg["content"][:80]
-                        if len(msg["content"]) > 80:
-                            preview += "..."
-                        lines.append(f"- **{label}**: {preview}")
-                    response = "\n".join(lines)
-
-            elif cmd == "/help":
-                response = (
-                    "**Hermes-Lite Commands**\n\n"
-                    "Just type your message for a general response.\n\n"
-                    "**Tool invocation:**\n"
-                    "  `!tool_name {\"arg\": \"value\"}` — Call a registered tool directly\n\n"
-                    "**Commands:**\n"
-                    "  `/tools` — List registered tools and their schemas\n"
-                    "  `/history` — View recent conversation history\n"
-                    "  `/help` — Show this help message\n"
-                    "  `/exit`, `/quit`, `/q` — Exit the CLI\n"
-                    "  `Ctrl+C` or `Ctrl+D` — Exit the CLI"
-                )
-
+        # Check for system/internal commands
+        elif prompt.lower().strip() == "/tools":
+            descs = self.get_tool_descriptions()
+            if not descs:
+                response = "No tools registered."
             else:
-                # General response — include available tools info plus
-                # a routing-transparency line so the user (and tests)
-                # can see which tier was chosen.
-                tier_emoji = "⚡" if decision.tier == "local" else "☁️ "
-                descs = self.get_tool_descriptions()
-                tool_list = ", ".join(f"`{d['name']}`" for d in descs) if descs else "none registered"
-                response = (
-                    f"{tier_emoji} using **{decision.tier}** model `{decision.model_id}` "
-                    f"(score {decision.complexity_score:.2f})\n\n"
-                    f"I'm running with **{self.registry.tool_count} tool(s)** registered: {tool_list}\n\n"
-                    f"You said: _{prompt}_\n\n"
-                    f"_Routing: {decision.reason}_\n\n"
-                    f"*Use `!tool_name {{...}}` to invoke a tool directly, or `/tools` to see available tools.*"
+                lines = ["**Available Tools:**\n"]
+                for d in descs:
+                    lines.append(f"- **{d['name']}**: {d['description']}")
+                    if d.get("parameters"):
+                        props = d["parameters"].get("properties", {})
+                        for pname, pinfo in props.items():
+                            required = pname in d["parameters"].get("required", [])
+                            req_mark = " (required)" if required else ""
+                            lines.append(f"  - `{pname}`: {pinfo.get('description', '')}{req_mark}")
+                response = "\n".join(lines)
+
+        elif prompt.lower().strip() == "/history":
+            history = await self._get_history(limit=10)
+            if not history:
+                response = "No conversation history."
+            else:
+                lines = ["**Recent History:**\n"]
+                for msg in history:
+                    label = "You" if msg["role"] == "user" else "Hermes"
+                    preview = msg["content"][:80]
+                    if len(msg["content"]) > 80:
+                        preview += "..."
+                    lines.append(f"- **{label}**: {preview}")
+                response = "\n".join(lines)
+
+        elif prompt.lower().strip() == "/help":
+            response = (
+                "**Hermes-Lite Commands**\n\n"
+                "Just type your message for a general response.\n\n"
+                "**Tool invocation:**\n"
+                "  `!tool_name {\"arg\": \"value\"}` — Call a registered tool directly\n\n"
+                "**Commands:**\n"
+                "  `/tools` — List registered tools and their schemas\n"
+                "  `/history` — View recent conversation history\n"
+                "  `/help` — Show this help message\n"
+                "  `/exit`, `/quit`, `/q` — Exit the CLI\n"
+                "  `Ctrl+C` or `Ctrl+D` — Exit the CLI"
+            )
+
+        else:
+            # General prompt — run the ToolLoop with the LLM
+            loop_result = await self.tool_loop.run(
+                messages=await self._build_llm_history(prompt),
+                model=decision.model_id,
+            )
+
+            # Build the user-facing response with transparency info
+            tier_emoji = "⚡" if decision.tier == "local" else "☁️"
+            parts = []
+            if loop_result.tool_names:
+                tool_summary = ", ".join(
+                    f"`{n}`" for n in _dedupe(loop_result.tool_names)
                 )
+                parts.append(
+                    f"{tier_emoji} _{decision.tier}_ · "
+                    f"{loop_result.iterations} turn(s) · tools: {tool_summary}"
+                )
+            else:
+                parts.append(
+                    f"{tier_emoji} _{decision.tier}_ · "
+                    f"{loop_result.iterations} turn(s)"
+                )
+            if loop_result.terminated_by != "complete":
+                parts.append(f"_⚠ Loop ended: {loop_result.terminated_by}_")
+            parts.append("")  # blank line
+            parts.append(loop_result.response)
+            response = "\n".join(parts)
+
+            # Persist each tool-call and tool-result to memory
+            # (the final assistant response is persisted below;
+            #  intermediate tool turns are persisted here)
+            for i, tn in enumerate(loop_result.tool_names):
+                await self._save_message("tool", f"called {tn}", metadata={"tool_index": i})
+            # Save the loop outcome metadata for the assistant message
+            routing_meta["tool_loop"] = {
+                "iterations": loop_result.iterations,
+                "tool_calls_made": loop_result.tool_calls_made,
+                "tool_names": loop_result.tool_names,
+                "terminated_by": loop_result.terminated_by,
+            }
+
+            # Record the actual LLM outcome back into the router
+            self.router.record_outcome(
+                decision,
+                succeeded=(loop_result.terminated_by in ("complete", "repeated_error")),
+                tool_calls_malformed=(loop_result.terminated_by == "malformed_tool_call"),
+            )
+
+            # Observability: log the turn (T12)
+            _obs = loop_result.metadata.get("_obs", {})
+            log_turn(
+                turn_id=uuid.uuid4().hex[:16],
+                tier=decision.tier,
+                model=decision.model_id,
+                prompt_tokens=_obs.get("prompt_tokens", 0),
+                completion_tokens=_obs.get("completion_tokens", 0),
+                elapsed_ms=_obs.get("elapsed_ms", 0),
+                tools_called=list(_dedupe(loop_result.tool_names)),
+                errors=_obs.get("errors", []),
+            )
 
         # Save assistant response — embed routing decision and tool
         # outcome so downstream workers (and the test suite) can verify
@@ -354,12 +712,64 @@ class HermesOrchestrator:
                 "routing": routing_meta,
             },
         )
-        # Feed the booking-keeping back into the router so escalation
-        # state is correct. Tool invocations and general responses are
-        # both counted as a "success" right now (no real LLM call yet);
-        # T4/T6 will swap this for an actual model outcome.
-        self.router.record_outcome(decision, succeeded=True, tool_calls_malformed=False)
+        # For direct-tool and command paths, record a generic success
+        # into the router (no real LLM call).
+        if not prompt.startswith("!") and prompt.lower().strip() not in ("/tools", "/history", "/help"):
+            pass  # already recorded above in the else branch
+        else:
+            self.router.record_outcome(decision, succeeded=True, tool_calls_malformed=False)
         return response
+
+    async def _build_llm_history(
+        self,
+        current_prompt: str,
+    ) -> list[dict[str, Any]]:
+        """Build the OpenAI-format messages list from memory + current prompt.
+
+        Includes a system message, the cross-session memory block injected
+        via :class:`hermes_lite.memory_bridge.MemoryBridge.load_into_prompt`,
+        recent history from SQLite, and the current user prompt as the
+        last message.
+        """
+        # Cross-session memory (T9). Sync — the bridge holds its own lock
+        # and SQLite is fast enough that we don't need to async-ify it
+        # here. If the bridge isn't initialized (e.g. tests skip start()),
+        # we still produce a clean system prompt with no memory block.
+        memory_block = ""
+        try:
+            from hermes_lite.memory_bridge import get_default_bridge
+
+            memory_block = get_default_bridge().load_into_prompt(max_chars=800)
+        except Exception:
+            memory_block = ""
+
+        system_parts = [
+            "You are Hermes-Lite, a helpful AI assistant with access to tools. "
+            "Use tools when they help answer the user's question. "
+            "When you have enough information to answer directly, respond in plain text without tool calls."
+        ]
+        if memory_block:
+            system_parts.append(memory_block)
+
+        msgs: list[dict[str, Any]] = [
+            {"role": "system", "content": "\n\n".join(system_parts)}
+        ]
+
+        # Pull recent conversation from memory
+        db_history = await self._get_history(limit=16)
+        for m in db_history:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role in ("user", "assistant"):
+                msgs.append({"role": role, "content": content})
+            # Tool messages from memory are omitted here — they're
+            # only relevant within a single ToolLoop run.
+
+        # Append the current user prompt (it may already be in history
+        # from the _save_message call, but we guarantee it's the last
+        # message by adding it explicitly).
+        msgs.append({"role": "user", "content": current_prompt})
+        return msgs
 
     def start(self) -> None:
         """Launch the CLI with the orchestrator wired in as the prompt handler."""
@@ -384,6 +794,24 @@ class HermesOrchestrator:
         asyncio.run(_setup_and_run())
 
 
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _dedupe(seq: list[str]) -> list[str]:
+    """Return a de-duplicated copy of *seq*, preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in seq:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
 __all__ = [
     "HermesOrchestrator",
+    "ToolLoop",
+    "ToolLoopResult",
 ]
