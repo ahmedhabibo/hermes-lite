@@ -457,8 +457,15 @@ class HermesOrchestrator:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _create_default_tools(self) -> None:
-        """Register the 6 essential tools via hermes_lite.tools_builtins."""
+        """Register the 6 essential tools via hermes_lite.tools_builtins,
+        then add the subagent tool (single-shot delegated LLM calls).
+
+        The subagent import is deferred to break a circular dependency:
+        ``subagent`` imports ``ToolLoop`` from this module at load time.
+        """
         _register_essentials(self.registry)
+        from hermes_lite.subagent import register_subagent_tool
+        register_subagent_tool(self.registry)
 
     @property
     def tool_loop(self) -> ToolLoop:
