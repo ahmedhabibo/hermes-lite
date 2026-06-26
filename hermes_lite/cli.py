@@ -288,16 +288,37 @@ def run_cli(
         Text shown as the input prompt cue.
     """
     try:
-        asyncio.run(
-            _run_async(
-                on_prompt=on_prompt,
-                welcome_message=welcome_message,
-                system_prompt=system_prompt,
-                prompt_text=prompt_text,
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    try:
+        if loop and loop.is_running():
+            # Already inside an event loop (e.g. PTY wrapper) — run
+            # the async CLI in a separate thread with its own loop.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(
+                    asyncio.run,
+                    _run_async(
+                        on_prompt=on_prompt,
+                        welcome_message=welcome_message,
+                        system_prompt=system_prompt,
+                        prompt_text=prompt_text,
+                    ),
+                ).result()
+        else:
+            asyncio.run(
+                _run_async(
+                    on_prompt=on_prompt,
+                    welcome_message=welcome_message,
+                    system_prompt=system_prompt,
+                    prompt_text=prompt_text,
+                )
             )
-        )
     except KeyboardInterrupt:
-        _render_status("Goodbye!")
+        pass
+    _render_status("Goodbye!")
 
 
 # ---------------------------------------------------------------------------

@@ -873,21 +873,32 @@ class HermesOrchestrator:
 
         # We use asyncio.run inside run_cli — but run_cli calls asyncio.run
         # on its internal _run_async, so we need to provide a sync wrapper.
-        import asyncio
+        # Launch the CLI — run_cli handles the event-loop detection internally
+        import asyncio as _aio
 
         async def _setup_and_run() -> None:
             await self._initialize_memory()
             run_cli(
                 on_prompt=self._handle_prompt,
                 welcome_message=(
-                    "Hermes-Lite v0.1 — Orchestrator Engine\n\n"
+                    "Hermes-Lite v0.2 — Orchestrator Engine\n\n"
                     f"Session: {self.session_id[:8]}...\n"
                     f"Tools: {self.registry.tool_count} registered\n"
                     f"DB: {self.db_path}"
                 ),
             )
 
-        asyncio.run(_setup_and_run())
+        try:
+            loop = _aio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(_aio.run, _setup_and_run()).result()
+        else:
+            _aio.run(_setup_and_run())
 
 
 # ---------------------------------------------------------------------------

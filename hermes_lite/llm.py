@@ -10,17 +10,26 @@ Both clients accept the full OpenAI Chat Completions schema, including
 - ``local:<model>`` → local endpoint
 - ``nvidia/<model>``, ``minimaxai/<model>``, etc. → cloud endpoint
 
+Local models: ``tools`` / ``tool_choice`` are **not** sent to the server
+because llama.cpp auto-generates a PEG grammar from the tools schema that
+small models (e.g. 3B Q4) cannot reliably follow.  Instead, tool calls are
+parsed from the model's free-form text output (see :func:`parse_tool_calls_from_text`).
+
 Configuration via env vars (sensible defaults):
 - ``HERMES_LITE_LOCAL_URL``       (default ``http://127.0.0.1:8080/v1``)
 - ``HERMES_LITE_LOCAL_MODEL``     (default ``qwen2.5-3b-instruct-q4_k_m.gguf``)
 - ``HERMES_LITE_CLOUD_URL``       (default ``https://integrate.api.nvidia.com/v1``)
 - ``HERMES_LITE_CLOUD_MODEL``     (default ``minimaxai/minimax-m3``)
 - ``HERMES_LITE_NVIDIA_API_KEY``  (NVIDIA NIM token; required for cloud)
+- ``HERMES_LITE_LOCAL_TOOLS``     set ``1`` to send tools to local endpoint
+  (only use when the local model is large enough to handle the grammar)
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -35,6 +44,10 @@ LOCAL_MODEL_DEFAULT = "qwen2.5-3b-instruct-q4_k_m.gguf"
 
 CLOUD_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 CLOUD_MODEL_DEFAULT = "minimaxai/minimax-m3"
+
+# When True, tools/tool_choice are sent to the local endpoint just like cloud.
+# Default False because small models + llama-server PEG grammar = 500 errors.
+_LOCAL_TOOLS_ENABLED = os.environ.get("HERMES_LITE_LOCAL_TOOLS", "0") == "1"
 
 
 def _resolve_local() -> tuple[str, str]:
@@ -58,7 +71,6 @@ def _resolve_cloud() -> tuple[str, str, str | None]:
 # ---------------------------------------------------------------------------
 
 Tier = Literal["local", "cloud"]
-
 
 @dataclass(frozen=True)
 class ChatRequest:
@@ -132,6 +144,59 @@ def _pick_client_and_model(model: str) -> tuple[Callable[[], AsyncOpenAI], str, 
 
 
 # ---------------------------------------------------------------------------
+# Text-based tool-call parser (for local models without grammar)
+# ---------------------------------------------------------------------------
+
+# Pattern 1: tool_call code fences  ```tool_call\n{...}\n```
+_FENCED_TOOL_RE = re.compile(
+    r"```tool_call\s*\n\s*(\{.*?\})\s*\n\s*```",
+    re.DOTALL,
+)
+
+# Pattern 2: any fenced JSON block containing "name" and "arguments"
+_FENCED_JSON_RE = re.compile(
+    r"```(?:json|tool)?\s*\n?\s*(\{\s*\"name\"\s*:.*?\})\s*\n?\s*```",
+    re.DOTALL,
+)
+
+# Pattern 3: bare JSON object on its own line with a "name" key
+_BARE_JSON_RE = re.compile(
+    r"^\s*(\{\s*\"name\"\s*:\s*\"[^\"]+\".*\})\s*$",
+    re.MULTILINE,
+)
+
+
+def parse_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
+    """Extract tool calls from a model's free-form text output.
+
+    Tries three patterns in order of specificity.  Returns a list of
+    dicts with keys ``id``, ``name``, and ``arguments`` (a JSON string).
+    """
+    found: list[dict[str, Any]] = []
+
+    for pattern in (_FENCED_TOOL_RE, _FENCED_JSON_RE, _BARE_JSON_RE):
+        for m in pattern.finditer(text):
+            raw = m.group(1).strip()
+            try:
+                obj = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict) and "name" in obj:
+                args = obj.get("arguments", {})
+                if not isinstance(args, dict):
+                    args = {}
+                found.append({
+                    "id": f"tc_{len(found)}",
+                    "name": obj["name"],
+                    "arguments": json.dumps(args),
+                })
+        if found:
+            break  # first pattern that matches wins
+
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
 
@@ -141,13 +206,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
     client_factory, model, tier = _pick_client_and_model(req.model)
     client = client_factory()
 
+    # For local models, skip sending `tools` / `tool_choice` so llama-server
+    # does NOT build a PEG grammar.  Small local models (e.g. 3B Q4) fail
+    # to follow the grammar reliably, causing 500 errors.  Instead we parse
+    # tool calls from the free-form text output after the fact.
+    send_tools = bool(req.tools) and (tier != "local" or _LOCAL_TOOLS_ENABLED)
+
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": req.messages,
         "temperature": req.temperature,
         "max_tokens": req.max_tokens,
     }
-    if req.tools:
+    if send_tools:
         kwargs["tools"] = req.tools
         kwargs["tool_choice"] = req.tool_choice
     kwargs.update(req.extra)
@@ -157,9 +228,11 @@ async def chat(req: ChatRequest) -> ChatResponse:
     msg = choice.message
 
     tool_calls: list[dict[str, Any]] = []
+    content_text: str = msg.content or ""
+
     if msg.tool_calls:
+        # Cloud tier or _LOCAL_TOOLS_ENABLED — native tool calls from the API.
         for tc in msg.tool_calls:
-            # Each tc has: id, type, function={name, arguments}
             tool_calls.append(
                 {
                     "id": tc.id,
@@ -167,9 +240,23 @@ async def chat(req: ChatRequest) -> ChatResponse:
                     "arguments": tc.function.arguments,
                 }
             )
+    elif not send_tools and req.tools:
+        # Local tier — tools were withheld; parse from text instead.
+        tool_calls = parse_tool_calls_from_text(content_text)
+        if tool_calls:
+            # Strip tool_call fences from the displayed text.
+            for _ in tool_calls:
+                content_text = re.sub(
+                    r"\n?```tool_call\s*\n.*?```\n?",
+                    "",
+                    content_text,
+                    count=1,
+                    flags=re.DOTALL,
+                )
+            content_text = content_text.strip()
 
     return ChatResponse(
-        content=msg.content or "",
+        content=content_text,
         tool_calls=tool_calls,
         finish_reason=choice.finish_reason or "stop",
         model=model,
@@ -221,6 +308,7 @@ __all__ = [
     "Tier",
     "chat",
     "tool_def",
+    "parse_tool_calls_from_text",
     "_resolve_local",
     "_resolve_cloud",
     "_pick_client_and_model",

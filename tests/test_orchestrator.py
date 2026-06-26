@@ -40,8 +40,7 @@ async def _mock_chat_fn(req) -> ChatResponse:
             last_user = m.get("content", "")[:200]
             break
     return ChatResponse(
-        content=f"I can help with file searches, web searches, and fetching content from URLs. "
-                f"I can also add or modify entries in a persistent memory for future reference. "
+        content=f"I have access to tools like read_file, search_files, terminal, memory, web_search, and web_fetch. "
                 f"What specific task would you like to accomplish? "
                 f"(echo of prompt: {last_user})",
         tool_calls=[],
@@ -459,10 +458,6 @@ class TestRoutingIntegration:
         await orchestrator._handle_prompt("find invoice 5")
         assert orchestrator.router.consecutive_local_failures == 0
 
-    @pytest.mark.xfail(
-        reason="Live cloud API call — flaked once on Hermes NIM 500 (peg-native format error). Router-override logic is correct; rerun gets it through.",
-        strict=False,
-    )
     async def test_router_override(self, tmp_path):
         """A custom router passed at construction is honoured."""
         from hermes_lite.router import LiteRouter
@@ -471,11 +466,17 @@ class TestRoutingIntegration:
             fallback_chain=["local:custom-only"],
             local_max_complexity=0.05,  # aggressively cloud
         )
+        loop = ToolLoop(
+            registry=PluginRegistry(strict_validation=True),
+            chat_fn=_mock_chat_fn,
+        )
         orch = HermesOrchestrator(
             db_path=str(tmp_path / "routing.db"),
             router=custom,
+            tool_loop=loop,
         )
         orch._create_default_tools()
+        loop.registry = orch.registry
         await orch._initialize_memory()
         try:
             response = await orch._handle_prompt("hello")

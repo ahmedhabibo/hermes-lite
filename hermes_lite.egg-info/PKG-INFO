@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: hermes-lite
-Version: 0.1.0
+Version: 0.2.0
 Summary: Hermes Lite — lightweight agent framework with tool registry, SQLite memory, and orchestration
 Requires-Python: >=3.9
 Requires-Dist: pydantic>=2.0
