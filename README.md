@@ -1,8 +1,28 @@
-# Hermes-Lite v0.3
+# Hermes-Lite ⚡
 
-> Lightweight local-first agent framework — Qwen 2.5 7B Instruct LLM, 6 essential tools, routing controller, sandboxed execution, persistent memory, and observability.
+[![Tests](https://img.shields.io/badge/tests-312%20passing-brightgreen)](./tests)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
+[![Model: Qwen 2.5 7B](https://img.shields.io/badge/model-Qwen%202.5%207B%20Instruct-orange)](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
 
-Designed for macOS (Apple Silicon, 8 GB). Runs fully local. No GPU required.
+> **Run a full AI agent on any laptop — no GPU, no cloud API key, no cost.**
+
+Hermes-Lite is a local-first agent framework that proves you don't need expensive hardware or cloud subscriptions to run an agentic AI. A 7B quantized model + 6 essential tools + intelligent routing = a fully functional agent on an 8 GB MacBook.
+
+**Built for the Hermes Agent Accelerated Business Hackathon** (NVIDIA × Stripe × Nous Research).
+
+---
+
+## Why Hermes-Lite?
+
+Most agent frameworks assume you have a GPU cluster or an OpenAI API key. That leaves out:
+
+- 💻 Developers on old laptops (8 GB RAM, no discrete GPU)
+- 🌍 Users in regions with expensive or unreliable internet
+- 🔒 Privacy-conscious teams that need fully offline agents
+- 💰 Students and indie hackers who can't justify $100+/month in API costs
+
+**Hermes-Lite runs 100% local.** The 7B Qwen model (4.4 GB Q4_K_M) fits in RAM alongside your IDE. Six built-in tools let it read files, search code, run commands, remember facts, and fetch web pages — all without a single outbound API call. When you *do* need heavy lifting, the router escalates to your cloud endpoint of choice (NVIDIA NIM, OpenAI, anything OpenAI-compatible).
 
 ---
 
@@ -42,7 +62,43 @@ That's it. Start chatting in under 15 minutes.
 
 ---
 
-## Examples
+## How It Works
+
+```
+┌─────────────────────────────────────────────────┐
+│                    Router                       │
+│  LiteRouter: classify by complexity → local/cloud│
+└──────────────┬──────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────┐
+│                  LLM Layer                       │
+│  Qwen 2.5 7B (local)  │  NVIDIA NIM (cloud)     │
+└──────────────┬──────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────┐
+│               Tool Loop                          │
+│  2-tier: LLM → tool → result → LLM → response   │
+│  Max 4 iterations, repeated-error, malformed-JSON│
+│  Tool calls parsed from text (no PEG grammar)   │
+└──────────────┬──────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────┐
+│           Tool Layer (PluginRegistry)            │
+│ read_file │ search_files │ terminal │ memory │   │
+│ web_search │ web_fetch │ subagent                │
+└──────────────┬──────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────┐
+│              Sandbox / Backend                   │
+│  sandbox-exec   │  Hermes MCP   │  curl          │
+└──────────────────────────────────────────────────┘
+```
+
+**Key insight:** Local models can't reliably parse structured `tools` JSON from the OpenAI API spec. Hermes-Lite solves this by *not sending* `tools`/`tool_choice` to the local endpoint — instead, the model outputs tool calls as natural text, and a 4-pattern regex parser extracts them. This works even on models that never saw tool-calling in training.
+
+---
+
+## Demo
 
 ```
 $ python -m hermes_lite
@@ -72,47 +128,13 @@ Hermes-Lite is a local agent framework with 6 built-in tools...
 |------|-------------|
 | **Tool registry** | 6 built-in essentials: `read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`. Pydantic-validated dispatch. Extensible via `ToolDefinition`. |
 | **LLM layer** | OpenAI-compatible chat API. Default: local Qwen 2.5 7B Instruct GGUF via llama.cpp. Supports remote fallback (NVIDIA NIM). |
-| **Tool loop** | Two-tier loop: LLM calls tools → results fed back → LLM responds. Max 4 iterations, repeated-error and malformed-JSON guards. Tool calls parsed from free-form text (4 regex patterns) — no PEG grammar dependency. |
+| **Tool loop** | Two-tier loop: LLM calls tools → results fed back → LLM responds. Max 4 iterations, repeated-error and malformed-JSON guards. Tool calls parsed from free-form text (4 regex patterns). |
 | **Router** | LiteRouter classifies prompts by complexity. Simple queries → `_local_` tier (7B model). Complex reasoning → `_cloud_` tier. Consecutive-failure escalation with linear backoff. |
 | **Sandbox** | `terminal` tool runs commands in a macOS sandbox (`sandbox-exec`). Timeout-safe with process lifecycle management. |
 | **Memory** | SQLite bridge for cross-session facts. `add`, `replace`, `remove`, `list` — unique-match semantics. Loaded into every prompt (800 char cap). |
 | **Sub-agent** | Spawn parallel `delegate_task` sub-agents. Isolated context + toolset per child. Nested orchestration (max 2 levels). |
 | **Observability** | Per-turn JSONL logging, rotation at 10 MB, `python -m hermes_lite stats` for session summary. |
 | **CLI** | prompt_toolkit + Rich terminal. Ctrl+C/D, `!tool {args}` direct invocation, `/tools`, `/history`, `/help`. |
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│                    Router                       │
-│  LiteRouter: classify by complexity → local/cloud│
-└──────────────┬──────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────┐
-│                  LLM Layer                       │
-│  Qwen 2.5 7B (local)  │  NVIDIA NIM (cloud)     │
-└──────────────┬──────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────┐
-│               Tool Loop                          │
-│  2-tier: LLM → tool → result → LLM → response   │
-│  Max 4 iterations, repeated-error, malformed-JSON│
-│  Tool calls parsed from text (no PEG grammar)   │
-└──────────────┬──────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────┐
-│           Tool Layer (PluginRegistry)            │
-│ read_file │ search_files │ terminal │ memory │   │
-│ web_search │ web_fetch │ subagent                │
-└──────────────┬──────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────┐
-│              Sandbox / Backend                   │
-│  sandbox-exec   │  Hermes MCP   │  curl   │      │
-└──────────────────────────────────────────────────┘
-```
 
 ---
 
@@ -146,13 +168,26 @@ Tests cover: registry (48), memory (47), orchestrator (31), tool loop (15), tool
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) — PRs welcome, TDD preferred.
+
+---
+
+## License
+
+[MIT](./LICENSE) — use it, fork it, ship it.
+
+---
+
 ## CHANGELOG
 
 ### 0.3.0 — Qwen 2.5 7B Instruct + text-based tool-call parser
-- Upgraded local model: Qwen 2.5 3B → Qwen 2.5 7B Instruct Q4_K_M
+- Upgraded local model: Qwen 2.5 3B → Qwen 2.5 7B Instruct Q4_K_M (4.4 GB)
 - Text-based tool-call parser: 4 regex patterns (Qwen blank-line JSON, fenced `tool_call`, fenced JSON, bare JSON)
 - Skip `tools`/`tool_choice` for local endpoint — avoids PEG grammar 500 errors on small models
 - Cloud fallback via NVIDIA NIM (configurable model chain)
+- MIT license + CONTRIBUTING guide added
 
 ### 0.2.0 — Local Qwen 3B + 6 essential tools + router + sandbox
 - Tool registry with 6 essentials (read_file, search_files, terminal, memory, web_search, web_fetch)

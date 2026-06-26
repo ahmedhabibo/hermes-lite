@@ -881,7 +881,7 @@ class HermesOrchestrator:
             run_cli(
                 on_prompt=self._handle_prompt,
                 welcome_message=(
-                    "Hermes-Lite v0.2 — Orchestrator Engine\n\n"
+                    "Hermes-Lite v0.3 — Orchestrator Engine\n\n"
                     f"Session: {self.session_id[:8]}...\n"
                     f"Tools: {self.registry.tool_count} registered\n"
                     f"DB: {self.db_path}"
