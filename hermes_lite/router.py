@@ -32,7 +32,7 @@ Config via env (overridable at construction):
 * ``LITE_LARGE_CONTEXT_TOKENS``              (default ``4000``)
 * ``LITE_LARGE_HISTORY_TURNS``               (default ``4``)
 * ``LITE_FALLBACK_CHAIN``                    (default
-  ``"local:qwen2.5-3b-instruct-q4_k_m.gguf,nvidia/qwen/qwen3.5-397b-a17b,nvidia/minimaxai/minimax-m3"``)
+  ``"local:qwen2.5-7b-instruct-q4_k_m.gguf,nvidia/qwen/qwen3.5-397b-a17b,nvidia/minimaxai/minimax-m3"``)
 
 Public API:
 * ``LiteRouter``
@@ -94,7 +94,7 @@ _INTENT_PREFIX: tuple[str, ...] = (
 )
 
 DEFAULT_FALLBACK_CHAIN = (
-    "local:qwen2.5-3b-instruct-q4_k_m.gguf,"
+    "local:qwen2.5-7b-instruct-q4_k_m.gguf,"
     "nvidia/qwen/qwen3.5-397b-a17b,"
     "nvidia/minimaxai/minimax-m3"
 )

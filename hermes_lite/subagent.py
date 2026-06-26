@@ -160,7 +160,7 @@ def _default_local_model_id() -> str:
     """
     return os.environ.get(
         "HERMES_LITE_SUBAGENT_MODEL",
-        "local:qwen2.5-3b-instruct-q4_k_m.gguf",
+        "local:qwen2.5-7b-instruct-q4_k_m.gguf",
     )
 
 

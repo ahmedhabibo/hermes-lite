@@ -143,7 +143,7 @@ def log_turn(
     tier:
         ``"local"`` or ``"cloud"``.
     model:
-        Full model identifier, e.g. ``"local:qwen2.5-3b"``.
+        Full model identifier, e.g. ``"local:qwen2.5-7b"``.
     prompt_tokens:
         Tokens sent to the model.
     completion_tokens:

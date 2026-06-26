@@ -17,7 +17,7 @@ parsed from the model's free-form text output (see :func:`parse_tool_calls_from_
 
 Configuration via env vars (sensible defaults):
 - ``HERMES_LITE_LOCAL_URL``       (default ``http://127.0.0.1:8080/v1``)
-- ``HERMES_LITE_LOCAL_MODEL``     (default ``qwen2.5-3b-instruct-q4_k_m.gguf``)
+- ``HERMES_LITE_LOCAL_MODEL``     (default ``qwen2.5-7b-instruct-q4_k_m.gguf``)
 - ``HERMES_LITE_CLOUD_URL``       (default ``https://integrate.api.nvidia.com/v1``)
 - ``HERMES_LITE_CLOUD_MODEL``     (default ``minimaxai/minimax-m3``)
 - ``HERMES_LITE_NVIDIA_API_KEY``  (NVIDIA NIM token; required for cloud)
@@ -40,7 +40,7 @@ from openai import AsyncOpenAI
 # ---------------------------------------------------------------------------
 
 LOCAL_URL_DEFAULT = "http://127.0.0.1:8080/v1"
-LOCAL_MODEL_DEFAULT = "qwen2.5-3b-instruct-q4_k_m.gguf"
+LOCAL_MODEL_DEFAULT = "qwen2.5-7b-instruct-q4_k_m.gguf"
 
 CLOUD_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 CLOUD_MODEL_DEFAULT = "minimaxai/minimax-m3"
@@ -159,22 +159,39 @@ _FENCED_JSON_RE = re.compile(
     re.DOTALL,
 )
 
-# Pattern 3: bare JSON object on its own line with a "name" key
+# Most permissive: bare JSON object on its own line with "name" key
 _BARE_JSON_RE = re.compile(
     r"^\s*(\{\s*\"name\"\s*:\s*\"[^\"]+\".*\})\s*$",
     re.MULTILINE,
+)
+
+# Qwen 2.5 Instruct tool-call output — the model wraps JSON with
+# blank lines above/below when emitting tool calls from the
+# system-prompt tool list.  The _BARE_JSON_RE already catches
+# single-line objects; this pattern catches multi-line JSON
+# blocks that are separated by blank lines from surrounding text.
+_QWEN_TOOL_CALL_RE = re.compile(
+    r"\n\n(\{\"name\"\s*:\s*\"[^\"]+\".*?\})\n\n",
+    re.DOTALL,
 )
 
 
 def parse_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
     """Extract tool calls from a model's free-form text output.
 
-    Tries three patterns in order of specificity.  Returns a list of
-    dicts with keys ``id``, ``name``, and ``arguments`` (a JSON string).
+    Tries four patterns in order of specificity:
+
+    1. Qwen 2.5 native format (JSON between blank lines)
+    2. ``tool_call`` code fences
+    3. Any fenced JSON block with ``"name"`` key
+    4. Bare JSON object on its own line with ``"name"`` key
+
+    Returns a list of dicts with keys ``id``, ``name``, and
+    ``arguments`` (a JSON string).
     """
     found: list[dict[str, Any]] = []
 
-    for pattern in (_FENCED_TOOL_RE, _FENCED_JSON_RE, _BARE_JSON_RE):
+    for pattern in (_QWEN_TOOL_CALL_RE, _FENCED_TOOL_RE, _FENCED_JSON_RE, _BARE_JSON_RE):
         for m in pattern.finditer(text):
             raw = m.group(1).strip()
             try:
