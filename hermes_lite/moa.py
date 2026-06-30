@@ -147,19 +147,29 @@ class MoAResult:
 
 
 # ---------------------------------------------------------------------------
-# Built-in presets — all verified-working NIM models (2026-06-30)
+# Built-in presets — all verified-working NIM free-tier models (2026-06-30)
+#
+# Available NIM free models:
+#   minimaxai/minimax-m3            — general reasoning (primary default)
+#   moonshotai/kimi-k2.6            — strong general model
+#   qwen/qwen3.5-397b-a17b          — MoE, efficient at scale
+#   minimaxai/minimax-m2.7          — general reasoning
+#   deepseek-ai/deepseek-v4-pro     — reasoning/code (timeout-sensitive)
+#   nvidia/nemotron-3-ultra-550b-a55b — high throughput
+#   deepseek-ai/deepseek-v4-flash   — fast, lightweight
+#   qwen/qwen3.5-122b-a10b         — lighter MoE
 # ---------------------------------------------------------------------------
 
 BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "council": MoAPreset(
         name="council",
         references=[
-            MoAModelConfig(model="qwen/qwen3.5-122b-a10b", temperature=0.4, max_tokens=4096),
-            MoAModelConfig(model="stepfun-ai/step-3.7-flash", temperature=0.5, max_tokens=4096),
-            MoAModelConfig(model="mistralai/mistral-medium-3.5-128b", temperature=0.4, max_tokens=4096),
+            MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.4, max_tokens=4096),
+            MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.5, max_tokens=4096),
+            MoAModelConfig(model="qwen/qwen3.5-397b-a17b", temperature=0.4, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="moonshotai/kimi-k2.6",
+            model="deepseek-ai/deepseek-v4-pro",
             temperature=0.2,
             max_tokens=4096,
         ),
@@ -169,12 +179,11 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "speed": MoAPreset(
         name="speed",
         references=[
-            MoAModelConfig(model="nvidia/nemotron-3-super-120b-a12b", temperature=0.4, max_tokens=2048),
-            MoAModelConfig(model="stepfun-ai/step-3.7-flash", temperature=0.5, max_tokens=2048),
-            MoAModelConfig(model="mistralai/mistral-medium-3.5-128b", temperature=0.4, max_tokens=2048),
+            MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.4, max_tokens=2048),
+            MoAModelConfig(model="deepseek-ai/deepseek-v4-flash", temperature=0.5, max_tokens=2048),
         ],
         aggregator=MoAModelConfig(
-            model="minimaxai/minimax-m3",
+            model="deepseek-ai/deepseek-v4-flash",
             temperature=0.3,
             max_tokens=4096,
         ),
@@ -184,12 +193,12 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "verification": MoAPreset(
         name="verification",
         references=[
-            MoAModelConfig(model="nvidia/nemotron-3-super-120b-a12b", temperature=0.1, max_tokens=4096),
-            MoAModelConfig(model="minimaxai/minimax-m2.7", temperature=0.1, max_tokens=4096),
             MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.1, max_tokens=4096),
+            MoAModelConfig(model="qwen/qwen3.5-397b-a17b", temperature=0.1, max_tokens=4096),
+            MoAModelConfig(model="deepseek-ai/deepseek-v4-pro", temperature=0.1, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="moonshotai/kimi-k2.6",
+            model="minimaxai/minimax-m3",
             temperature=0.05,
             max_tokens=8192,
         ),
@@ -199,12 +208,11 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "coding": MoAPreset(
         name="coding",
         references=[
-            MoAModelConfig(model="minimaxai/minimax-m2.7", temperature=0.3, max_tokens=4096),
-            MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.3, max_tokens=4096),
-            MoAModelConfig(model="qwen/qwen3.5-122b-a10b", temperature=0.3, max_tokens=4096),
+            MoAModelConfig(model="deepseek-ai/deepseek-v4-pro", temperature=0.3, max_tokens=4096),
+            MoAModelConfig(model="qwen/qwen3.5-397b-a17b", temperature=0.3, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="minimaxai/minimax-m2.7",
+            model="deepseek-ai/deepseek-v4-pro",
             temperature=0.1,
             max_tokens=8192,
         ),
@@ -214,10 +222,9 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "creative": MoAPreset(
         name="creative",
         references=[
-            MoAModelConfig(model="minimaxai/minimax-m2.7", temperature=0.8, max_tokens=4096),
-            MoAModelConfig(model="nvidia/nemotron-3-super-120b-a12b", temperature=0.9, max_tokens=4096),
+            MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.8, max_tokens=4096),
+            MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.9, max_tokens=4096),
             MoAModelConfig(model="qwen/qwen3.5-122b-a10b", temperature=0.7, max_tokens=4096),
-            MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.8, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
             model="minimaxai/minimax-m3",

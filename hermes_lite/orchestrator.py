@@ -813,13 +813,9 @@ class HermesOrchestrator:
                 # Observability: log the turn
                 log_turn(
                     turn_id=uuid.uuid4().hex[:16],
-                    prompt=prompt,
-                    response=moa_result.response,
-                    model=moa_result.aggregator_model,
                     tier="cloud",
-                    iterations=1,
-                    tool_calls_made=0,
-                    metadata=moa_result.metadata,
+                    model=moa_result.aggregator_model,
+                    errors=[r.error for r in moa_result.reference_results if r.error],
                 )
 
             else:
