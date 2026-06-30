@@ -45,6 +45,16 @@ from hermes_lite.cli import run_cli
 from hermes_lite.router import LiteRouter, RoutingDecision
 from hermes_lite.tools_builtins import register_builtins as _register_essentials
 from hermes_lite.observability import log_turn
+from hermes_lite.moa import (
+    MoAEngine,
+    MoAPreset,
+    MoAResult,
+    BUILTIN_PRESETS,
+    get_preset,
+    list_presets as list_moa_presets,
+    format_preset_info,
+    format_moa_result,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +462,9 @@ class HermesOrchestrator:
         # ToolLoop — set up lazily in start() after tools are registered.
         # Accept an override for testing.
         self._tool_loop: ToolLoop | None = tool_loop
+        # MoA (Mixture-of-Agents) — None means inactive (default).
+        # Set via /moa <preset> command or HERMES_LITE_MOA_PRESET env var.
+        self.active_moa_preset: MoAPreset | None = None
 
         # Ensure parent directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -722,74 +735,146 @@ class HermesOrchestrator:
                 "  `/stats` — Show last 10 turns summary\n"
                 "  `/clear` — Reset conversation (keeps memory)\n"
                 "  `/memory` — Show what's loaded into context\n"
+                "  `/moa` — Show MoA status and available presets\n"
+                "  `/moa <preset>` — Activate Mixture-of-Agents with a preset\n"
+                "  `/moa off` — Deactivate MoA (return to normal)\n"
                 "  `/history` — View recent conversation history\n"
                 "  `/help` — Show this help message\n"
                 "  `/exit`, `/quit`, `/q` — Exit the CLI\n"
                 "  `Ctrl+C` or `Ctrl+D` — Exit the CLI"
             )
 
+        elif prompt.lower().strip().startswith("/moa"):
+            # /moa command — activate, deactivate, or show MoA status
+            parts = prompt.strip().split(None, 1)  # ["/moa", "<arg>"]
+            if len(parts) == 1:
+                # /moa with no arg — show status + available presets
+                if self.active_moa_preset:
+                    response = (
+                        f"**MoA Status:** Active\n\n"
+                        f"{format_preset_info(self.active_moa_preset)}\n\n"
+                        f"Use `/moa off` to deactivate."
+                    )
+                else:
+                    presets_list = ", ".join(f"`{p}`" for p in list_moa_presets())
+                    response = (
+                        f"**MoA Status:** Inactive\n\n"
+                        f"Available presets: {presets_list}\n\n"
+                        f"Activate with `/moa <preset>` (e.g. `/moa council`)"
+                    )
+            elif parts[1].lower().strip() == "off":
+                self.active_moa_preset = None
+                response = "**MoA:** Deactivated. Using normal ToolLoop."
+            else:
+                preset_name = parts[1].strip().lower()
+                preset = get_preset(preset_name)
+                if preset:
+                    self.active_moa_preset = preset
+                    response = (
+                        f"**MoA:** Activated with `{preset_name}` preset\n\n"
+                        f"{format_preset_info(preset)}"
+                    )
+                else:
+                    presets_list = ", ".join(f"`{p}`" for p in list_moa_presets())
+                    response = (
+                        f"**Unknown preset:** `{preset_name}`\n\n"
+                        f"Available presets: {presets_list}"
+                    )
+
 
         else:
-            # General prompt — run the ToolLoop with the LLM
-            loop_result = await self.tool_loop.run(
-                messages=await self._build_llm_history(prompt),
-                model=decision.model_id,
-            )
+            # General prompt — check if MoA is active, otherwise ToolLoop
 
-            # Build the user-facing response with transparency info
-            tier_emoji = "⚡" if decision.tier == "local" else "☁️"
-            parts = []
-            if loop_result.tool_names:
-                tool_summary = ", ".join(
-                    f"`{n}`" for n in _dedupe(loop_result.tool_names)
+            if self.active_moa_preset is not None:
+                # MoA path — run reference models, then aggregator
+                moa_engine = MoAEngine(preset=self.active_moa_preset)
+                moa_messages = await self._build_llm_history(prompt)
+                moa_result: MoAResult = await moa_engine.run(
+                    messages=moa_messages,
+                    prompt=prompt,
                 )
-                parts.append(
-                    f"{tier_emoji} _{decision.tier}_ · "
-                    f"{loop_result.iterations} turn(s) · tools: {tool_summary}"
+                response = format_moa_result(moa_result)
+
+                # Persist MoA metadata
+                routing_meta["moa"] = {
+                    "preset": moa_result.metadata.get("preset"),
+                    "refs_ok": moa_result.metadata.get("refs_ok"),
+                    "refs_total": moa_result.metadata.get("refs_total"),
+                    "agg_model": moa_result.aggregator_model,
+                    "terminated_by": moa_result.terminated_by,
+                }
+
+                # Observability: log the turn
+                log_turn(
+                    turn_id=uuid.uuid4().hex[:16],
+                    prompt=prompt,
+                    response=moa_result.response,
+                    model=moa_result.aggregator_model,
+                    tier="cloud",
+                    iterations=1,
+                    tool_calls_made=0,
+                    metadata=moa_result.metadata,
                 )
+
             else:
-                parts.append(
-                    f"{tier_emoji} _{decision.tier}_ · "
-                    f"{loop_result.iterations} turn(s)"
+                # Normal ToolLoop path
+                loop_result = await self.tool_loop.run(
+                    messages=await self._build_llm_history(prompt),
+                    model=decision.model_id,
                 )
-            if loop_result.terminated_by != "complete":
-                parts.append(f"_⚠ Loop ended: {loop_result.terminated_by}_")
-            parts.append("")  # blank line
-            parts.append(loop_result.response)
-            response = "\n".join(parts)
 
-            # Persist each tool-call and tool-result to memory
-            # (the final assistant response is persisted below;
-            #  intermediate tool turns are persisted here)
-            for i, tn in enumerate(loop_result.tool_names):
-                await self._save_message("tool", f"called {tn}", metadata={"tool_index": i})
-            # Save the loop outcome metadata for the assistant message
-            routing_meta["tool_loop"] = {
-                "iterations": loop_result.iterations,
-                "tool_calls_made": loop_result.tool_calls_made,
-                "tool_names": loop_result.tool_names,
-                "terminated_by": loop_result.terminated_by,
-            }
+                # Build the user-facing response with transparency info
+                tier_emoji = "⚡" if decision.tier == "local" else "☁️"
+                parts = []
+                if loop_result.tool_names:
+                    tool_summary = ", ".join(
+                        f"`{n}`" for n in _dedupe(loop_result.tool_names)
+                    )
+                    parts.append(
+                        f"{tier_emoji} _{decision.tier}_ · "
+                        f"{loop_result.iterations} turn(s) · tools: {tool_summary}"
+                    )
+                else:
+                    parts.append(
+                        f"{tier_emoji} _{decision.tier}_ · "
+                        f"{loop_result.iterations} turn(s)"
+                    )
+                if loop_result.terminated_by != "complete":
+                    parts.append(f"_⚠ Loop ended: {loop_result.terminated_by}_")
+                parts.append("")  # blank line
+                parts.append(loop_result.response)
+                response = "\n".join(parts)
 
-            # Record the actual LLM outcome back into the router
-            self.router.record_outcome(
-                decision,
-                succeeded=(loop_result.terminated_by in ("complete", "repeated_error")),
-                tool_calls_malformed=(loop_result.terminated_by == "malformed_tool_call"),
-            )
+                # Persist each tool-call and tool-result to memory
+                for i, tn in enumerate(loop_result.tool_names):
+                    await self._save_message("tool", f"called {tn}", metadata={"tool_index": i})
+                # Save the loop outcome metadata for the assistant message
+                routing_meta["tool_loop"] = {
+                    "iterations": loop_result.iterations,
+                    "tool_calls_made": loop_result.tool_calls_made,
+                    "tool_names": loop_result.tool_names,
+                    "terminated_by": loop_result.terminated_by,
+                }
 
-            # Observability: log the turn (T12)
-            _obs = loop_result.metadata.get("_obs", {})
-            log_turn(
-                turn_id=uuid.uuid4().hex[:16],
-                tier=decision.tier,
-                model=decision.model_id,
-                prompt_tokens=_obs.get("prompt_tokens", 0),
-                completion_tokens=_obs.get("completion_tokens", 0),
-                elapsed_ms=_obs.get("elapsed_ms", 0),
-                tools_called=list(_dedupe(loop_result.tool_names)),
-                errors=_obs.get("errors", []),
-            )
+                # Record the actual LLM outcome back into the router
+                self.router.record_outcome(
+                    decision,
+                    succeeded=(loop_result.terminated_by in ("complete", "repeated_error")),
+                    tool_calls_malformed=(loop_result.terminated_by == "malformed_tool_call"),
+                )
+
+                # Observability: log the turn (T12)
+                _obs = loop_result.metadata.get("_obs", {})
+                log_turn(
+                    turn_id=uuid.uuid4().hex[:16],
+                    tier=decision.tier,
+                    model=decision.model_id,
+                    prompt_tokens=_obs.get("prompt_tokens", 0),
+                    completion_tokens=_obs.get("completion_tokens", 0),
+                    elapsed_ms=_obs.get("elapsed_ms", 0),
+                    tools_called=list(_dedupe(loop_result.tool_names)),
+                    errors=_obs.get("errors", []),
+                )
 
         # For /clear we intentionally skip saving the assistant response
         # so the conversation history is truly empty after clearing.
@@ -810,7 +895,11 @@ class HermesOrchestrator:
         # For direct-tool and command paths, record a generic success
         # into the router (no real LLM call).
         _command_set = ("/tools", "/history", "/help", "/model", "/stats", "/memory", "/clear")
-        if not prompt.startswith("!") and prompt.lower().strip() not in _command_set:
+        _command_prefixes = ("/moa",)
+        _is_command = prompt.lower().strip() in _command_set or any(
+            prompt.lower().strip().startswith(p) for p in _command_prefixes
+        )
+        if not prompt.startswith("!") and not _is_command:
             pass  # already recorded above in the else branch
         else:
             self.router.record_outcome(decision, succeeded=True, tool_calls_malformed=False)

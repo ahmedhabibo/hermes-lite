@@ -52,6 +52,17 @@ from hermes_lite.subagent import (
     SUBAGENT_WALL_TIMEOUT_S,
     SUBAGENT_SYSTEM_PROMPT,
 )
+from hermes_lite.moa import (
+    MoAEngine,
+    MoAPreset,
+    MoAModelConfig,
+    MoAResult,
+    BUILTIN_PRESETS,
+    get_preset,
+    list_presets as list_moa_presets,
+    format_preset_info,
+    format_moa_result,
+)
 
 __all__ = [
     "PluginRegistry",
@@ -108,4 +119,14 @@ __all__ = [
     "SUBAGENT_MAX_ITERATIONS",
     "SUBAGENT_WALL_TIMEOUT_S",
     "SUBAGENT_SYSTEM_PROMPT",
+    # MoA
+    "MoAEngine",
+    "MoAPreset",
+    "MoAModelConfig",
+    "MoAResult",
+    "BUILTIN_PRESETS",
+    "get_preset",
+    "list_moa_presets",
+    "format_preset_info",
+    "format_moa_result",
 ]

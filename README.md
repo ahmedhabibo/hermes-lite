@@ -1,6 +1,6 @@
 # Hermes-Lite ⚡
 
-[![Tests](https://img.shields.io/badge/tests-312%20passing-brightgreen)](./tests)
+[![Tests](https://img.shields.io/badge/tests-341%20passing-brightgreen)](./tests)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 [![Cloud: NVIDIA NIM](https://img.shields.io/badge/cloud-NVIDIA%20NIM-76B900)](https://build.nvidia.com/)
@@ -151,7 +151,8 @@ For local-first: `local:qwen2.5-7b-instruct-q4_k_m.gguf,minimaxai/minimax-m3`
 | **Sandbox** | `terminal` tool runs commands in a macOS sandbox (`sandbox-exec`). Timeout-safe with process lifecycle management. |
 | **Memory** | SQLite bridge for cross-session facts. `add`, `replace`, `remove`, `list` — unique-match semantics. Loaded into every prompt (800 char cap). |
 | **Sub-agent** | Spawn isolated subagents for parallel work (default: cloud NIM flash model). Nested orchestration (max 2 levels). |
-| **Observability** | Per-turn JSONL logging, rotation at 10 MB, `python -m hermes_lite stats` for session summary. |
+| **MoA** | Mixture-of-Agents: run 3–5 diverse LLMs in parallel, then aggregate into a single superior answer. 5 built-in presets (`council`, `speed`, `verification`, `coding`, `creative`). CLI: `/moa <preset>`. |
+| **Observability** | Per-turn JSONL logging, rotation at 10 MB, `python -m hermes_lite.stats` for session summary. |
 | **CLI** | prompt_toolkit + Rich terminal. Ctrl+C/D, `!tool {args}` direct invocation, `/tools`, `/history`, `/help`. |
 
 ---
@@ -170,8 +171,62 @@ For local-first: `local:qwen2.5-7b-instruct-q4_k_m.gguf,minimaxai/minimax-m3`
 | `HERMES_LITE_LOCAL_MODEL` | `qwen2.5-7b-instruct-q4_k_m.gguf` | Local model file |
 | `HERMES_LITE_LOCAL_TOOLS` | unset | Set `1` to send `tools`/`tool_choice` to local endpoint |
 | `LITE_LOCAL_MAX_COMPLEXITY` | `0.3` | Max complexity score for using lighter model |
+| `HERMES_LITE_MOA_PRESET` | — | Auto-activate MoA preset on startup (e.g. `council`) |
+| `HERMES_LITE_MOA_TIMEOUT` | `30` | Seconds before a reference model is skipped |
 | `LITE_FALLBACK_CHAIN` | `minimaxai/minimax-m3,moonshotai/kimi-k2.6,...` | Model fallback chain |
 | `HERMES_LITE_SUBAGENT_MODEL` | `deepseek-ai/deepseek-v4-flash` | Subagent default model |
+
+---
+
+## Mixture-of-Agents (MoA)
+
+Run multiple diverse LLMs on the same prompt in parallel, then let an **aggregator** model synthesize their outputs into a single, superior answer.
+
+### Quick Start
+
+```
+❯ /moa council      # Activate the "council" preset (3 diverse refs + 1 aggregator)
+❯ Tell me about Python GIL
+[MoA] 🔀 3 refs → aggregator → final
+```
+
+### Built-in Presets
+
+| Preset | References | Aggregator | Use case |
+|--------|-----------|------------|----------|
+| `council` | minimax-m3, kimi-k2.6, qwen3.5-397b | deepseek-v4-pro | General reasoning — maximum diversity |
+| `speed` | minimax-m3, deepseek-v4-flash | deepseek-v4-flash | Fast answers — lighter models |
+| `verification` | kimi-k2.6, qwen3.5-397b, deepseek-v4-pro | minimax-m3 | Fact-checking — cross-verify claims |
+| `coding` | deepseek-v4-pro, qwen3.5-397b | deepseek-v4-pro | Code generation — precision-focused |
+| `creative` | minimax-m3, kimi-k2.6, qwen3.5-122b | minimax-m3 | Creative writing — divergent styles |
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `/moa` | Show status + available presets |
+| `/moa council` | Activate a preset |
+| `/moa off` | Deactivate (back to normal ToolLoop) |
+
+### Architecture
+
+```
+User prompt
+    │
+    ├─→ Reference A (model-1) ──┐
+    ├─→ Reference B (model-2) ──┼─→ Aggregator ─→ Final answer
+    └─→ Reference C (model-3) ──┘
+```
+
+- **Parallel mode** (default): `asyncio.gather` runs all references concurrently, then feeds collected outputs to the aggregator
+- **Sequential mode**: Each reference sees the previous reference's output as context — useful for iterative refinement
+- **Graceful degradation**: If some references fail/timeout, the aggregator works with whatever succeeded. If all fail, falls back to a direct single-model call.
+
+### Environment Variable Override
+
+```bash
+HERMES_LITE_MOA_PRESET=council  # Auto-activate on startup
+```
 
 ---
 
