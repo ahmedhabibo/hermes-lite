@@ -169,7 +169,7 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
             MoAModelConfig(model="qwen/qwen3.5-397b-a17b", temperature=0.4, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="deepseek-ai/deepseek-v4-pro",
+            model="moonshotai/kimi-k2.6",
             temperature=0.2,
             max_tokens=4096,
         ),
@@ -181,9 +181,10 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
         references=[
             MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.4, max_tokens=2048),
             MoAModelConfig(model="deepseek-ai/deepseek-v4-flash", temperature=0.5, max_tokens=2048),
+            MoAModelConfig(model="qwen/qwen3.5-122b-a10b", temperature=0.4, max_tokens=2048),
         ],
         aggregator=MoAModelConfig(
-            model="deepseek-ai/deepseek-v4-flash",
+            model="minimaxai/minimax-m3",
             temperature=0.3,
             max_tokens=4096,
         ),
@@ -240,7 +241,7 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
 _DEFAULT_REF_TEMP = float(os.environ.get("HERMES_LITE_MOA_REF_TEMPERATURE", "0.4"))
 _DEFAULT_AGG_TEMP = float(os.environ.get("HERMES_LITE_MOA_AGG_TEMPERATURE", "0.2"))
 _DEFAULT_MAX_TOKENS = int(os.environ.get("HERMES_LITE_MOA_MAX_TOKENS", "4096"))
-_DEFAULT_TIMEOUT_S = float(os.environ.get("HERMES_LITE_MOA_TIMEOUT_S", "30"))
+_DEFAULT_TIMEOUT_S = float(os.environ.get("HERMES_LITE_MOA_TIMEOUT_S", "60"))
 
 
 # ---------------------------------------------------------------------------
