@@ -56,6 +56,12 @@ from hermes_lite.moa import (
     format_moa_result,
 )
 
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("hermes-lite")
+except Exception:
+    __version__ = "0.5.0"
+
 
 # ---------------------------------------------------------------------------
 # Built-in tools are now provided by :mod:`hermes_lite.tools_builtins`.
@@ -970,7 +976,7 @@ class HermesOrchestrator:
             run_cli(
                 on_prompt=self._handle_prompt,
                 welcome_message=(
-                    "Hermes-Lite v0.3 — Orchestrator Engine\n\n"
+                    f"Hermes-Lite v{__version__} — Orchestrator Engine\n\n"
                     f"Session: {self.session_id[:8]}...\n"
                     f"Tools: {self.registry.tool_count} registered\n"
                     f"DB: {self.db_path}"
