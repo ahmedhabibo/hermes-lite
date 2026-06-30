@@ -425,11 +425,18 @@ class TestRoutingIntegration:
         return {}
 
     async def test_simple_prompt_records_local_tier(self, orchestrator):
-        """A trivial 'find X' prompt must record tier=local."""
+        """A trivial 'find X' prompt must record the default tier.
+
+        Since v0.4 (cloud-first): simple prompts on the default cloud chain
+        route to cloud tier. On a local-first chain they route to local.
+        We check the tier matches the chain head.
+        """
         await orchestrator._handle_prompt("find customer_id 42")
         routing = await self._last_routing(orchestrator)
-        assert routing.get("tier") == "local"
-        assert routing.get("model_id", "").startswith("local:")
+        # Cloud-first default chain: tier == cloud
+        chain_head = orchestrator.router.fallback_chain[0]
+        expected_tier = "local" if chain_head.startswith("local:") or "/" not in chain_head else "cloud"
+        assert routing.get("tier") == expected_tier
 
     async def test_refactor_prompt_records_cloud_tier(self, orchestrator):
         """Acceptance: 'refactor this 200-line script' must record cloud."""

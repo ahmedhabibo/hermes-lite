@@ -3,33 +3,49 @@
 [![Tests](https://img.shields.io/badge/tests-312%20passing-brightgreen)](./tests)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
-[![Model: Qwen 2.5 7B](https://img.shields.io/badge/model-Qwen%202.5%207B%20Instruct-orange)](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF)
+[![Cloud: NVIDIA NIM](https://img.shields.io/badge/cloud-NVIDIA%20NIM-76B900)](https://build.nvidia.com/)
 
-> **Run a full AI agent on any laptop — no GPU, no cloud API key, no cost.**
+> **Cloud-first AI agent via NVIDIA NIM Free API — with local fallback for offline use.**
 
-Hermes-Lite is a local-first agent framework that proves you don't need expensive hardware or cloud subscriptions to run an agentic AI. A 7B quantized model + 6 essential tools + intelligent routing = a fully functional agent on an 8 GB MacBook.
-
-**Built for the Hermes Agent Accelerated Business Hackathon** (NVIDIA × Stripe × Nous Research).
+Hermes-Lite is an agent framework that defaults to cloud LLMs (NVIDIA NIM Free API) for quality, with a local mode for offline/privacy use. Rate limiting, API key rotation, and a smart fallback chain keep it resilient — all for free.
 
 ---
 
 ## Why Hermes-Lite?
 
-Most agent frameworks assume you have a GPU cluster or an OpenAI API key. That leaves out:
-
-- 💻 Developers on old laptops (8 GB RAM, no discrete GPU)
-- 🌍 Users in regions with expensive or unreliable internet
-- 🔒 Privacy-conscious teams that need fully offline agents
-- 💰 Students and indie hackers who can't justify $100+/month in API costs
-
-**Hermes-Lite runs 100% local.** The 7B Qwen model (4.4 GB Q4_K_M) fits in RAM alongside your IDE. Six built-in tools let it read files, search code, run commands, remember facts, and fetch web pages — all without a single outbound API call. When you *do* need heavy lifting, the router escalates to your cloud endpoint of choice (NVIDIA NIM, OpenAI, anything OpenAI-compatible).
+- ☁️ **Cloud-first, free tier:** NVIDIA NIM Free API gives 40 RPM of production-grade LLMs (MiniMax M3, Kimi K2.6, Qwen 3.5, DeepSeek V4) at zero cost
+- 🔄 **Resilient by default:** Token-bucket rate limiter, exponential backoff on 429s, API key rotation from a pool
+- 🏠 **Local fallback:** Switch to a local 7B Qwen model for offline/privacy — same codebase, different prefix
+- 🛡️ **Smart routing:** Complexity-based tier selection. Simple queries → fast model. Complex reasoning → heavy model. Escalation on repeated failures.
+- 🧩 **6 built-in tools:** `read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`
+- 🔌 **Sub-agent delegation:** Spawn isolated subagents for parallel work
 
 ---
 
 ## Quick Start
 
+### Cloud Mode (default, no local model needed)
+
 ```bash
-# 1. Install llama.cpp (LLM server)
+# 1. Set your NVIDIA NIM API key (free at https://build.nvidia.com/)
+export HERMES_LITE_NVIDIA_API_KEY="nvapi-..."
+
+# Optional: add multiple keys for rotation
+# export HERMES_LITE_NVIDIA_API_KEYS="key1,key2,key3"
+
+# 2. Install hermes-lite
+git clone https://github.com/ahmedhabibo/hermes-lite.git
+cd hermes-lite
+pip install -e ".[test]"
+
+# 3. Run the CLI — starts with cloud models
+python -m hermes_lite
+```
+
+### Local Mode (offline / privacy)
+
+```bash
+# 1. Install llama.cpp
 brew install llama.cpp
 
 # 2. Download the model (Qwen 2.5 7B Instruct, Q4_K_M — 4.4 GB)
@@ -38,27 +54,22 @@ hf download Qwen/Qwen2.5-7B-Instruct-GGUF \
     qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf \
     --local-dir ~/.hermes_lite/models/
 
-# 3. Merge the split files
+# 3. Merge and start the server
 llama-gguf-split --merge \
     ~/.hermes_lite/models/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \
     ~/.hermes_lite/models/qwen2.5-7b-instruct-q4_k_m.gguf
 
-# 4. Start the LLM server
 llama-server \
     -m ~/.hermes_lite/models/qwen2.5-7b-instruct-q4_k_m.gguf \
     --port 8080 --temp 0.3 --repeat-penalty 1.1 \
     -ngl 99 -c 4096
 
-# 5. Install hermes-lite
-git clone https://github.com/ahmedhabibo/hermes-lite.git
-cd hermes-lite
-pip install -e ".[test]"
+# 4. Set a local-first fallback chain (or use local: prefix in chat)
+export LITE_FALLBACK_CHAIN="local:qwen2.5-7b-instruct-q4_k_m.gguf,minimaxai/minimax-m3"
 
-# 6. Run the CLI
+pip install -e ".[test]"
 python -m hermes_lite
 ```
-
-That's it. Start chatting in under 15 minutes.
 
 ---
 
@@ -66,26 +77,28 @@ That's it. Start chatting in under 15 minutes.
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                    Router                       │
-│  LiteRouter: classify by complexity → local/cloud│
+│              Router (cloud-first)                │
+│  LiteRouter: complexity → pick NIM model in chain│
+│  Escalation: failure → next model in chain       │
 └──────────────┬──────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────┐
 │                  LLM Layer                       │
-│  Qwen 2.5 7B (local)  │  NVIDIA NIM (cloud)     │
+│  NVIDIA NIM (cloud)   │  Qwen 7B (local)       │
+│  40 RPM rate limit    │  Text-parsed tool calls │
+│  Key rotation + retry │  No tools/grammar sent  │
 └──────────────┬──────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────┐
 │               Tool Loop                          │
 │  2-tier: LLM → tool → result → LLM → response   │
 │  Max 4 iterations, repeated-error, malformed-JSON│
-│  Tool calls parsed from text (no PEG grammar)   │
 └──────────────┬──────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────┐
 │           Tool Layer (PluginRegistry)            │
-│ read_file │ search_files │ terminal │ memory │   │
-│ web_search │ web_fetch │ subagent                │
+│ read_file │ search_files │ terminal │ memory │  │
+│ web_search │ web_fetch │ subagent               │
 └──────────────┬──────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────┐
@@ -94,31 +107,36 @@ That's it. Start chatting in under 15 minutes.
 └──────────────────────────────────────────────────┘
 ```
 
-**Key insight:** Local models can't reliably parse structured `tools` JSON from the OpenAI API spec. Hermes-Lite solves this by *not sending* `tools`/`tool_choice` to the local endpoint — instead, the model outputs tool calls as natural text, and a 4-pattern regex parser extracts them. This works even on models that never saw tool-calling in training.
+---
+
+## Rate Limiting & Key Rotation
+
+Hermes-Lite v0.4+ handles NVIDIA NIM Free API limits automatically:
+
+| Feature | Detail |
+|---------|--------|
+| **Rate limiter** | Token-bucket, 40 RPM (configurable via `HERMES_LITE_RPM`) |
+| **Exponential backoff** | 429 errors: 1s → 2s → 4s → 8s (max 16s) |
+| **Key rotation** | Comma-separated pool in `HERMES_LITE_NVIDIA_API_KEYS`. On 401/403/429, rotates to next key |
+| **Key cooldown** | Failed keys cool down for 60s before reuse |
+| **Max retries** | 4 attempts (configurable via `HERMES_LITE_MAX_RETRIES`) |
 
 ---
 
-## Demo
+## NIM Fallback Chain
+
+The default chain (cloud-first):
 
 ```
-$ python -m hermes_lite
-⚡ _local_ · 1 turn(s)
-I can help with file reads, searches, and more. What would you like?
-
-> find odoo modules
-⚡ search_files('*.py')
-⚡ _local_ · 2 turn(s) · tools: `search_files`
-I found 43 Python modules in the hermes_lite directory.
-
-> summarize README
-⚡ read_file('README.md')
-⚡ _local_ · 2 turn(s) · tools: `read_file`
-Hermes-Lite is a local agent framework with 6 built-in tools...
-
-> refactor this function
-⚡ _local_ · 1 turn(s)
-☁️ _cloud_ · routed to llm for complex reasoning
+minimaxai/minimax-m3           ← preferred (general-purpose)
+  → moonshotai/kimi-k2.6       ← strong reasoning
+    → qwen/qwen3.5-397b-a17b   ← MoE, efficient
+      → deepseek-ai/deepseek-v4-flash  ← fast fallback
 ```
+
+Override with `LITE_FALLBACK_CHAIN` env var (comma-separated).
+
+For local-first: `local:qwen2.5-7b-instruct-q4_k_m.gguf,minimaxai/minimax-m3`
 
 ---
 
@@ -127,12 +145,12 @@ Hermes-Lite is a local agent framework with 6 built-in tools...
 | Area | What it does |
 |------|-------------|
 | **Tool registry** | 6 built-in essentials: `read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`. Pydantic-validated dispatch. Extensible via `ToolDefinition`. |
-| **LLM layer** | OpenAI-compatible chat API. Default: local Qwen 2.5 7B Instruct GGUF via llama.cpp. Supports remote fallback (NVIDIA NIM). |
-| **Tool loop** | Two-tier loop: LLM calls tools → results fed back → LLM responds. Max 4 iterations, repeated-error and malformed-JSON guards. Tool calls parsed from free-form text (4 regex patterns). |
-| **Router** | LiteRouter classifies prompts by complexity. Simple queries → `_local_` tier (7B model). Complex reasoning → `_cloud_` tier. Consecutive-failure escalation with linear backoff. |
+| **LLM layer** | OpenAI-compatible chat API. Default: cloud NIM (MiniMax M3). Supports local fallback (Qwen 7B via llama.cpp). Rate limiting + key rotation + exponential backoff. |
+| **Tool loop** | Two-tier loop: LLM calls tools → results fed back → LLM responds. Max 4 iterations, repeated-error and malformed-JSON guards. |
+| **Router** | LiteRouter classifies prompts by complexity. Cloud-first chain: light queries → fast model. Complex reasoning → heavier model. Consecutive-failure escalation walks the chain. |
 | **Sandbox** | `terminal` tool runs commands in a macOS sandbox (`sandbox-exec`). Timeout-safe with process lifecycle management. |
 | **Memory** | SQLite bridge for cross-session facts. `add`, `replace`, `remove`, `list` — unique-match semantics. Loaded into every prompt (800 char cap). |
-| **Sub-agent** | Spawn parallel `delegate_task` sub-agents. Isolated context + toolset per child. Nested orchestration (max 2 levels). |
+| **Sub-agent** | Spawn isolated subagents for parallel work (default: cloud NIM flash model). Nested orchestration (max 2 levels). |
 | **Observability** | Per-turn JSONL logging, rotation at 10 MB, `python -m hermes_lite stats` for session summary. |
 | **CLI** | prompt_toolkit + Rich terminal. Ctrl+C/D, `!tool {args}` direct invocation, `/tools`, `/history`, `/help`. |
 
@@ -140,23 +158,24 @@ Hermes-Lite is a local agent framework with 6 built-in tools...
 
 ## Configuration
 
-Set these environment variables (or edit `hermes_lite/llm.py` / `router.py`):
-
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `HERMES_LITE_LOCAL_URL` | `http://127.0.0.1:8080/v1` | Local llama.cpp server endpoint |
-| `HERMES_LITE_LOCAL_MODEL` | `qwen2.5-7b-instruct-q4_k_m.gguf` | Model file for local tier |
-| `HERMES_LITE_CLOUD_URL` | `https://integrate.api.nvidia.com/v1` | Cloud endpoint (NVIDIA NIM) |
-| `HERMES_LITE_CLOUD_MODEL` | `minimaxai/minimax-m3` | Model for cloud tier |
-| `HERMES_LITE_NVIDIA_API_KEY` | — | NVIDIA NIM API key (required for cloud) |
+| `HERMES_LITE_CLOUD_URL` | `https://integrate.api.nvidia.com/v1` | Cloud endpoint |
+| `HERMES_LITE_CLOUD_MODEL` | `minimaxai/minimax-m3` | Default cloud model |
+| `HERMES_LITE_NVIDIA_API_KEY` | — | Single NVIDIA NIM API key |
+| `HERMES_LITE_NVIDIA_API_KEYS` | — | Comma-separated key pool for rotation |
+| `HERMES_LITE_RPM` | `40` | Requests per minute (token bucket) |
+| `HERMES_LITE_MAX_RETRIES` | `4` | Max retry attempts on 429/server errors |
+| `HERMES_LITE_LOCAL_URL` | `http://127.0.0.1:8080/v1` | Local llama.cpp endpoint |
+| `HERMES_LITE_LOCAL_MODEL` | `qwen2.5-7b-instruct-q4_k_m.gguf` | Local model file |
 | `HERMES_LITE_LOCAL_TOOLS` | unset | Set `1` to send `tools`/`tool_choice` to local endpoint |
-| `LITE_LOCAL_MAX_COMPLEXITY` | `0.6` | Max complexity score for local routing |
+| `LITE_LOCAL_MAX_COMPLEXITY` | `0.3` | Max complexity score for using lighter model |
+| `LITE_FALLBACK_CHAIN` | `minimaxai/minimax-m3,moonshotai/kimi-k2.6,...` | Model fallback chain |
+| `HERMES_LITE_SUBAGENT_MODEL` | `deepseek-ai/deepseek-v4-flash` | Subagent default model |
 
 ---
 
 ## Test Suite
-
-312 tests, all passing. Run with:
 
 ```bash
 cd hermes-lite
@@ -182,6 +201,17 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) — PRs welcome, TDD preferred.
 
 ## CHANGELOG
 
+### 0.4.0 — Cloud-first NIM pivot + rate limiting
+- **Cloud-first default:** NIM Free API as primary LLM (MiniMax M3, Kimi K2.6, Qwen 3.5, DeepSeek V4 Flash)
+- **Rate limiting:** Token-bucket at 40 RPM (NIM Free API limit)
+- **API key rotation:** Comma-separated pool (`HERMES_LITE_NVIDIA_API_KEYS`), auto-rotate on 401/403/429
+- **Exponential backoff:** 1s → 2s → 4s → 8s (cap 16s) on 429/server errors
+- **Router v2:** Cloud-first fallback chain, consecutive-cloud-failure escalation walks the chain
+- **Subagent cloud default:** `deepseek-ai/deepseek-v4-flash` (set `HERMES_LITE_SUBAGENT_MODEL` for local)
+- **Local still supported:** `local:` prefix or local-first fallback chain for offline/privacy use
+- Added `stepfun-ai/` to cloud prefix detection
+- Bare model IDs containing `/` now route to cloud automatically
+
 ### 0.3.0 — Qwen 2.5 7B Instruct + text-based tool-call parser
 - Upgraded local model: Qwen 2.5 3B → Qwen 2.5 7B Instruct Q4_K_M (4.4 GB)
 - Text-based tool-call parser: 4 regex patterns (Qwen blank-line JSON, fenced `tool_call`, fenced JSON, bare JSON)
@@ -197,4 +227,3 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) — PRs welcome, TDD preferred.
 - Memory Bridge: cross-session persistent facts (SQLite)
 - Subagent: parallel tool-spawning with isolated context
 - Observability: per-turn JSONL logging + stats CLI
-- 304 tests, all passing on macOS + 8 GB

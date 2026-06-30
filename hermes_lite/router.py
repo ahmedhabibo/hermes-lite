@@ -1,9 +1,9 @@
-"""hermes_lite.router — Tier routing controller (local vs cloud).
+"""hermes_lite.router — Tier routing controller (cloud-first with local fallback).
 
-Decides which LLM tier (``local`` or ``cloud``) to use for a given prompt
-based on a deterministic complexity score. The orchestrator wires this in
-before any LLM call so the routing decision is policy-driven, not model-
-driven.
+Decides which LLM tier (``cloud`` or ``local``) to use for a given prompt
+based on a deterministic complexity score. **Cloud-first since v0.4:**
+the default fallback chain starts with NIM cloud models; local is a fallback
+for offline/privacy use.
 
 Complexity score (0.0 - 1.0, clamped) — weighted sum of four signals:
 
@@ -15,6 +15,11 @@ Complexity score (0.0 - 1.0, clamped) — weighted sum of four signals:
 
 A configurable threshold (env ``LITE_LOCAL_MAX_COMPLEXITY``, default 0.3)
 splits local-vs-cloud: <= threshold ⇒ ``local``; above ⇒ ``cloud``.
+
+With a cloud-first chain (the default) the threshold still works the same
+way — *low* complexity stays on the preferred (cloud) model, high complexity
+uses a heavier cloud model from the chain. The ``local`` tier only activates
+when the chain explicitly starts with a ``local:`` entry.
 
 Escalation
 ----------
@@ -32,7 +37,7 @@ Config via env (overridable at construction):
 * ``LITE_LARGE_CONTEXT_TOKENS``              (default ``4000``)
 * ``LITE_LARGE_HISTORY_TURNS``               (default ``4``)
 * ``LITE_FALLBACK_CHAIN``                    (default
-  ``"local:qwen2.5-7b-instruct-q4_k_m.gguf,nvidia/qwen/qwen3.5-397b-a17b,nvidia/minimaxai/minimax-m3"``)
+  ``"minimaxai/minimax-m3,moonshotai/kimi-k2.6,qwen/qwen3.5-397b-a17b,deepseek-ai/deepseek-v4-flash"``)
 
 Public API:
 * ``LiteRouter``
@@ -93,10 +98,16 @@ _INTENT_PREFIX: tuple[str, ...] = (
     "end-to-end",
 )
 
+# Cloud-first NIM fallback chain (v0.4+):
+# 1. minimaxai/minimax-m3        — best general-purpose
+# 2. moonshotai/kimi-k2.6        — strong reasoning
+# 3. qwen/qwen3.5-397b-a17b      — MoE, efficient
+# 4. deepseek-ai/deepseek-v4-flash — fast fallback
 DEFAULT_FALLBACK_CHAIN = (
-    "local:qwen2.5-7b-instruct-q4_k_m.gguf,"
-    "nvidia/qwen/qwen3.5-397b-a17b,"
-    "nvidia/minimaxai/minimax-m3"
+    "minimaxai/minimax-m3,"
+    "moonshotai/kimi-k2.6,"
+    "qwen/qwen3.5-397b-a17b,"
+    "deepseek-ai/deepseek-v4-flash"
 )
 
 
@@ -120,7 +131,6 @@ def parse_fallback_chain(raw: str | Iterable[str]) -> list[str]:
     else:
         parts = list(raw)
     return [p.strip() for p in parts if p and p.strip()]
-
 
 # ---------------------------------------------------------------------------
 # Routing decision
@@ -154,6 +164,12 @@ class LiteRouter:
     a 0.0-1.0 score from four observable signals and compares against a
     configurable threshold. State (failure counters, last failure reason)
     is held until ``reset()`` is called.
+
+    With a cloud-first chain (the v0.4+ default), the preferred entry is
+    a cloud model. Low-complexity requests stay on the preferred cloud
+    model; high-complexity ones try the next heavier model in the chain.
+    Local entries in the chain (``local:…``) are only used when the chain
+    explicitly includes them.
     """
 
     def __init__(
@@ -202,11 +218,9 @@ class LiteRouter:
                 os.environ.get("LITE_FALLBACK_CHAIN", DEFAULT_FALLBACK_CHAIN)
             )
         )
-        # Fallback chain must contain at least one local + one cloud
-        # candidate so an escalation always has somewhere to go. If the
-        # user only supplied one entry (e.g. all-local), we still allow
-        # it — the engine will surface an error if a forced cloud call
-        # is later made without credentials.
+        # If the user only supplied one entry, we still allow it — the
+        # engine will surface an error if a forced cloud call is later
+        # made without credentials.
         if not chain_raw:
             chain_raw = list(parse_fallback_chain(DEFAULT_FALLBACK_CHAIN))
         self.fallback_chain: list[str] = chain_raw
@@ -214,6 +228,9 @@ class LiteRouter:
         # Mutable state — survives across route() calls within a single
         # orchestrator session. Cleared by reset().
         self._consecutive_local_failures: int = 0
+        # Cloud escalation tracking (mirrors local tracking for cloud failures).
+        self._consecutive_cloud_failures: int = 0
+        self._fallback_index: int = 0  # position in chain for cloud fallback
 
     # -- complexity --------------------------------------------------------
 
@@ -295,7 +312,8 @@ class LiteRouter:
 
     @classmethod
     def _is_complex_intent(cls, prompt: str) -> bool:
-        """True when the prompt opens with a verb that warrants cloud.
+        """True when the prompt opens with a verb that warrants a heavier
+        model in the fallback chain.
 
         Examples that return True: ``"refactor …"``, ``"please rewrite …"``,
         ``"Architect a new …"``, ``"rearchitect …"``, ``"redesign …"``.
@@ -330,6 +348,27 @@ class LiteRouter:
         entry, _ = self._pick_preferred()
         return entry, "cloud"
 
+    def _pick_next_cloud_fallback(self) -> tuple[str, Tier] | None:
+        """Pick the next cloud model in the chain after _fallback_index.
+
+        Returns None if we've exhausted the cloud entries in the chain.
+        Advances _fallback_index so repeated calls walk the chain.
+        """
+        cloud_entries = [
+            (i, e) for i, e in enumerate(self.fallback_chain)
+            if not e.startswith("local:") and "/" in e
+        ]
+        if not cloud_entries:
+            return None
+        # Start from current fallback index, find next
+        for idx, entry in cloud_entries:
+            if idx >= self._fallback_index:
+                self._fallback_index = idx + 1
+                return entry, "cloud"
+        # Exhausted — wrap around to first cloud entry
+        self._fallback_index = cloud_entries[0][0] + 1
+        return cloud_entries[0][1], "cloud"
+
     # -- public ------------------------------------------------------------
 
     def route(
@@ -340,14 +379,35 @@ class LiteRouter:
     ) -> RoutingDecision:
         """Decide which tier + model handles this request.
 
-        Escalation rule: if there are ``>= escalate_after_failures``
-        consecutive local-*tier* failures recorded via
-        :meth:`record_outcome`, this call ignores the score and forces
-        the first cloud model in the fallback chain. The forced decision
-        flips ``RoutingDecision.fell_back`` to True so the orchestrator
-        can surface transparency.
+        Cloud-first logic (v0.4+):
+
+        1. **Escalation override** — if consecutive failures exceed the
+           threshold, advance to the next model in the chain.
+        2. **Score + intent** — for cloud-first chains, the preferred
+           model handles most requests. High complexity or complex-intent
+           picks the next heavier cloud model in the chain.
+        3. **Local fallback** — if the chain starts with a local entry,
+           the old behaviour applies (score > threshold → cloud escalation).
         """
         # 1. Escalation override (highest priority)
+        if self._consecutive_cloud_failures >= self.escalate_after_failures:
+            next_model = self._pick_next_cloud_fallback()
+            if next_model:
+                model_id, tier = next_model
+            else:
+                model_id, tier = self._pick_escalation()
+            score = self.complexity(prompt, context_tokens, history_turns)
+            return RoutingDecision(
+                model_id=model_id,
+                tier=tier,
+                complexity_score=score,
+                reason=(
+                    f"escalated: {self._consecutive_cloud_failures} consecutive "
+                    f"failures >= threshold {self.escalate_after_failures}"
+                ),
+                fell_back=True,
+            )
+
         if self._consecutive_local_failures >= self.escalate_after_failures:
             model_id, tier = self._pick_escalation()
             score = self.complexity(prompt, context_tokens, history_turns)
@@ -365,10 +425,10 @@ class LiteRouter:
         # 2. Score-based decision (preferred model from chain head)
         score = self.complexity(prompt, context_tokens, history_turns)
         model_id, tier = self._pick_preferred()
+
         if tier == "local":
             # If the preferred model is local and the score exceeds the
-            # threshold we escalate to the first cloud entry in the
-            # chain.
+            # threshold we escalate to the first cloud entry in the chain.
             if score > self.local_max_complexity:
                 cloud_model, cloud_tier = self._pick_escalation()
                 return RoutingDecision(
@@ -381,10 +441,59 @@ class LiteRouter:
                     ),
                     fell_back=True,
                 )
+
+            # 3. Intent-prefix override (still local-preferred + still below
+            #    threshold). Complex verbs escalate to cloud.
+            if self._is_complex_intent(prompt):
+                cloud_model, cloud_tier = self._pick_escalation()
+                return RoutingDecision(
+                    model_id=cloud_model,
+                    tier=cloud_tier,
+                    complexity_score=score,
+                    reason=(
+                        f"complex intent prefix detected "
+                        f"\u2192 cloud (preferred was local)"
+                    ),
+                    fell_back=True,
+                )
+
+            return RoutingDecision(
+                model_id=model_id,
+                tier="local",
+                complexity_score=score,
+                reason=f"complexity {score:.3f} <= threshold {self.local_max_complexity}",
+                fell_back=False,
+            )
+
         else:
-            # Preferred is cloud; honour it unless very simple (rare —
-            # usually means the operator deliberately chose a cloud-first
-            # chain).
+            # Preferred is cloud (cloud-first chain).
+            # High complexity → advance to next cloud model in chain.
+            if score > self.local_max_complexity or self._is_complex_intent(prompt):
+                next_model = self._pick_next_cloud_fallback()
+                if next_model:
+                    next_id, next_tier = next_model
+                    return RoutingDecision(
+                        model_id=next_id,
+                        tier=next_tier,
+                        complexity_score=score,
+                        reason=(
+                            f"complexity {score:.3f} > threshold {self.local_max_complexity} "
+                            f"\u2192 next cloud fallback"
+                        ),
+                        fell_back=True,
+                    )
+                # Exhausted chain — stay on preferred
+                return RoutingDecision(
+                    model_id=model_id,
+                    tier="cloud",
+                    complexity_score=score,
+                    reason=(
+                        f"complexity {score:.3f} > threshold but no more "
+                        f"cloud fallbacks; staying on preferred"
+                    ),
+                    fell_back=False,
+                )
+
             return RoutingDecision(
                 model_id=model_id,
                 tier="cloud",
@@ -394,31 +503,6 @@ class LiteRouter:
                 ),
                 fell_back=False,
             )
-
-        # 3. Intent-prefix override (still local-preferred + still below
-        #    threshold). If the user opens with a verb like "refactor",
-        #    "rewrite", "architect", etc., escalate to cloud — this
-        #    captures the spec's "boost" semantic for the acceptance
-        #    acceptance criterion regardless of literal prompt length.
-        if self._is_complex_intent(prompt):
-            cloud_model, cloud_tier = self._pick_escalation()
-            return RoutingDecision(
-                model_id=cloud_model,
-                tier=cloud_tier,
-                complexity_score=score,
-                reason=(
-                    f"complex intent prefix detected "
-                    f"\u2192 cloud (preferred was local)"
-                ),
-                fell_back=True,
-            )
-        return RoutingDecision(
-            model_id=model_id,
-            tier="local",
-            complexity_score=score,
-            reason=f"complexity {score:.3f} <= threshold {self.local_max_complexity}",
-            fell_back=False,
-        )
 
     # -- bookkeeping -------------------------------------------------------
 
@@ -431,27 +515,28 @@ class LiteRouter:
     ) -> None:
         """Update escalation state after a routed call returns.
 
-        A successful call resets the counter. A failure on a *local*
-        tier increments; on cloud it ignores (cloud failures mean
-        something else is wrong — surface, don't loop).
-
-        ``tool_calls_malformed=True`` counts as a local failure if the
-        decision was the local tier — the spec says malformed JSON
-        should trigger escalation.
+        A successful call resets the relevant counter. A failure on the
+        matching tier increments it. Cloud failures now also trigger
+        fallback along the NIM chain.
         """
-        if decision.tier != "local":
-            self._consecutive_local_failures = 0
+        if decision.tier == "local":
+            if succeeded and not tool_calls_malformed:
+                self._consecutive_local_failures = 0
+            else:
+                self._consecutive_local_failures += 1
             return
 
+        # Cloud tier
         if succeeded and not tool_calls_malformed:
-            self._consecutive_local_failures = 0
-            return
-
-        self._consecutive_local_failures += 1
+            self._consecutive_cloud_failures = 0
+        else:
+            self._consecutive_cloud_failures += 1
 
     def reset(self) -> None:
         """Clear escalation state — call at the start of a new task/session."""
         self._consecutive_local_failures = 0
+        self._consecutive_cloud_failures = 0
+        self._fallback_index = 0
 
     # -- introspection -----------------------------------------------------
 
@@ -459,6 +544,11 @@ class LiteRouter:
     def consecutive_local_failures(self) -> int:
         """Number of consecutive local-tier failures since last reset."""
         return self._consecutive_local_failures
+
+    @property
+    def consecutive_cloud_failures(self) -> int:
+        """Number of consecutive cloud-tier failures since last reset."""
+        return self._consecutive_cloud_failures
 
     def explain(self) -> dict[str, object]:
         """Return a JSON-serialisable snapshot of current router state —
@@ -471,6 +561,8 @@ class LiteRouter:
             "large_history_turns": self.large_history_turns,
             "fallback_chain": list(self.fallback_chain),
             "consecutive_local_failures": self._consecutive_local_failures,
+            "consecutive_cloud_failures": self._consecutive_cloud_failures,
+            "fallback_index": self._fallback_index,
         }
 
 

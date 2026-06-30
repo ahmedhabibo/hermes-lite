@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-lite"
-version = "0.3.0"
-description = "Hermes-Lite — run a full AI agent on any laptop. Local 7B model, 6 tools, routing, memory, observability."
+version = "0.4.0"
+description = "Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. Rate limiting, key rotation, cloud fallback chain, local fallback for offline use."
 requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.0",
@@ -15,10 +15,10 @@ dependencies = [
     "openai>=1.40.0",
 ]
 
-[tool.setuptools.packages.find]
-include = ["hermes_lite*"]
-
 [project.optional-dependencies]
+stripe = [
+    "stripe>=7.0.0",
+]
 test = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",

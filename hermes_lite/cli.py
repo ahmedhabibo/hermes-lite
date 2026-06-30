@@ -89,7 +89,9 @@ def _make_bindings(on_exit: Callable[[], Any] | None = None) -> KeyBindings:
 # Prompt handler type
 # ---------------------------------------------------------------------------
 
-PromptHandler = Callable[[str], str] | Callable[[str], Awaitable[str]]
+from typing import Union
+
+PromptHandler = Union[Callable[[str], str], Callable[[str], Awaitable[str]]]
 """Signature for the LLM generation callback.
 
 Receives the user's raw prompt string.  May be sync or async.

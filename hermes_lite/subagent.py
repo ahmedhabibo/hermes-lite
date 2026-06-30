@@ -2,9 +2,9 @@
 
 Adds a ``subagent`` tool to the PluginRegistry that spins up an
 **isolated** LiteOrchestrator-style loop in-process, runs a focused
-agent loop against the *local* Qwen 3B model, and returns a text
-summary. The host (parent) session's memory/state is never written
-to by the child.
+agent loop against a cloud NIM model (default: deepseek-v4-flash),
+and returns a text summary. The host (parent) session's memory/state
+is never written to by the child.
 
 Design rules (per the T8 spec)
 ------------------------------
@@ -151,16 +151,19 @@ def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
 
 
-def _default_local_model_id() -> str:
-    """Return the canonical model id for the subagent (local Qwen 3B).
+def _default_subagent_model_id() -> str:
+    """Return the canonical model id for the subagent.
 
-    Admins can override via ``HERMES_LITE_SUBAGENT_MODEL``. Anything
-    non-empty goes — we don't validate it here because the LLM client
-    will resolve it via ``_pick_client_and_model``.
+    **v0.4+:** Cloud-first — defaults to ``deepseek-ai/deepseek-v4-flash``
+    (lightweight NIM model ideal for short subagent tasks). Admins can
+    override via ``HERMES_LITE_SUBAGENT_MODEL``. Anything non-empty goes —
+    the LLM client resolves it via ``_pick_client_and_model``.
+
+    For offline use, set the env to ``local:qwen2.5-7b-instruct-q4_k_m.gguf``.
     """
     return os.environ.get(
         "HERMES_LITE_SUBAGENT_MODEL",
-        "local:qwen2.5-7b-instruct-q4_k_m.gguf",
+        "deepseek-ai/deepseek-v4-flash",
     )
 
 
@@ -281,7 +284,7 @@ class SubagentRunner:
             "scope": self.scope,
             "max_turns_requested": max_turns,
             "max_turns_effective": cap,
-            "model": _default_local_model_id(),
+            "model": _default_subagent_model_id(),
         }
         try:
             summary = await asyncio.wait_for(
@@ -381,7 +384,7 @@ class SubagentRunner:
 
             loop_result = await tool_loop.run(
                 messages=messages,
-                model=_default_local_model_id(),
+                model=_default_subagent_model_id(),
             )
             return {
                 "response": loop_result.response,

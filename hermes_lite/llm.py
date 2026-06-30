@@ -1,39 +1,49 @@
-"""hermes_lite.llm — OpenAI-compatible LLM client (local + cloud).
+"""hermes_lite.llm — OpenAI-compatible LLM client (cloud-first with local fallback).
 
 Supports two endpoints via the same OpenAI Python SDK:
-- Local llama.cpp server: ``http://127.0.0.1:8080/v1`` (Qwen 2.5 3B Q4)
-- Cloud NVIDIA NIM:       ``https://integrate.api.nvidia.com/v1``
+- Cloud NVIDIA NIM: ``https://integrate.api.nvidia.com/v1`` (default)
+- Local llama.cpp server: ``http://127.0.0.1:8080/v1`` (fallback)
 
-Both clients accept the full OpenAI Chat Completions schema, including
-``tools`` and ``tool_choice``. Model selection is by string prefix:
+**Cloud-first (v0.4+):** The default model is now a cloud NIM endpoint.
+Local mode is still available for offline/privacy use via the ``local:``
+prefix or when no API key is configured, but new installs default to cloud.
 
-- ``local:<model>`` → local endpoint
-- ``nvidia/<model>``, ``minimaxai/<model>``, etc. → cloud endpoint
+Rate limiting
+-------------
+NVIDIA NIM Free API enforces **40 requests per minute (RPM)**. This module
+includes a token-bucket rate limiter that throttles automatically:
 
-Local models: ``tools`` / ``tool_choice`` are **not** sent to the server
-because llama.cpp auto-generates a PEG grammar from the tools schema that
-small models (e.g. 3B Q4) cannot reliably follow.  Instead, tool calls are
-parsed from the model's free-form text output (see :func:`parse_tool_calls_from_text`).
+- 40 RPM budget (1 request per 1.5s steady-state)
+- Exponential backoff on 429 responses (1s → 2s → 4s → 8s, max 16s)
+- API key rotation from a comma-separated pool in ``HERMES_LITE_NVIDIA_API_KEYS``
 
-Configuration via env vars (sensible defaults):
+Configuration via env vars:
+
 - ``HERMES_LITE_LOCAL_URL``       (default ``http://127.0.0.1:8080/v1``)
 - ``HERMES_LITE_LOCAL_MODEL``     (default ``qwen2.5-7b-instruct-q4_k_m.gguf``)
 - ``HERMES_LITE_CLOUD_URL``       (default ``https://integrate.api.nvidia.com/v1``)
 - ``HERMES_LITE_CLOUD_MODEL``     (default ``minimaxai/minimax-m3``)
-- ``HERMES_LITE_NVIDIA_API_KEY``  (NVIDIA NIM token; required for cloud)
+- ``HERMES_LITE_NVIDIA_API_KEY``  (single key, or first key in pool)
+- ``HERMES_LITE_NVIDIA_API_KEYS`` (comma-separated key pool for rotation)
 - ``HERMES_LITE_LOCAL_TOOLS``     set ``1`` to send tools to local endpoint
-  (only use when the local model is large enough to handle the grammar)
+- ``HERMES_LITE_RPM``             (default ``40``, NIM Free API rate limit)
+- ``HERMES_LITE_MAX_RETRIES``     (default ``4``, max retry attempts on 429)
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Endpoint resolution
@@ -60,10 +70,154 @@ def _resolve_local() -> tuple[str, str]:
 def _resolve_cloud() -> tuple[str, str, str | None]:
     url = os.environ.get("HERMES_LITE_CLOUD_URL", CLOUD_URL_DEFAULT)
     model = os.environ.get("HERMES_LITE_CLOUD_MODEL", CLOUD_MODEL_DEFAULT)
+    # Single key from HERMES_LITE_NVIDIA_API_KEY, or fall back to NVIDIA_API_KEY
     api_key = os.environ.get(
         "HERMES_LITE_NVIDIA_API_KEY"
-    ) or os.environ.get("NVIDIA_API_KEY")  # fall back to existing env
+    ) or os.environ.get("NVIDIA_API_KEY")
     return url, model, api_key
+
+
+def _resolve_api_key_pool() -> list[str]:
+    """Return the list of available API keys for rotation.
+
+    Reads ``HERMES_LITE_NVIDIA_API_KEYS`` (comma-separated) first.
+    Falls back to ``HERMES_LITE_NVIDIA_API_KEY`` / ``NVIDIA_API_KEY``.
+    Deduplicates and drops empty values.
+    """
+    raw = os.environ.get("HERMES_LITE_NVIDIA_API_KEYS", "").strip()
+    if raw:
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+    else:
+        single = os.environ.get("HERMES_LITE_NVIDIA_API_KEY") or os.environ.get(
+            "NVIDIA_API_KEY", ""
+        )
+        keys = [single] if single.strip() else []
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            unique.append(k)
+    return unique
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter — token bucket for NIM Free API (40 RPM default)
+# ---------------------------------------------------------------------------
+
+DEFAULT_RPM = 40
+DEFAULT_MAX_RETRIES = 4
+_BACKOFF_BASE = 1.0  # seconds
+_BACKOFF_CAP = 16.0  # max single backoff
+
+
+class RateLimiter:
+    """Token-bucket rate limiter for cloud API calls.
+
+    Allows burst up to the full RPM budget, then enforces the refill rate.
+    Thread-safe for async use (single-threaded event loop assumed).
+    """
+
+    def __init__(self, rpm: int | None = None) -> None:
+        rpm = rpm or int(os.environ.get("HERMES_LITE_RPM", str(DEFAULT_RPM)))
+        self._rpm = max(1, rpm)
+        self._max_tokens = float(self._rpm)  # bucket size = 1 minute budget
+        self._refill_per_sec = self._rpm / 60.0
+        self._tokens = self._max_tokens  # start full
+        self._last_refill = time.monotonic()
+
+    @property
+    def rpm(self) -> int:
+        return self._rpm
+
+    async def acquire(self) -> None:
+        """Wait until a token is available. Throttles to the RPM budget."""
+        while True:
+            self._refill()
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                return
+            # No token available — sleep for the time to earn one
+            wait_time = 1.0 / self._refill_per_sec  # seconds per token
+            logger.debug("rate-limiter: waiting %.2fs for token", wait_time)
+            await asyncio.sleep(wait_time)
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_refill
+        self._tokens = min(self._max_tokens, self._tokens + elapsed * self._refill_per_sec)
+        self._last_refill = now
+
+
+# Module-level singleton — all cloud calls share the same bucket.
+_rate_limiter = RateLimiter()
+
+
+def get_rate_limiter() -> RateLimiter:
+    """Return the module-level cloud rate limiter (for testing/config)."""
+    return _rate_limiter
+
+
+# ---------------------------------------------------------------------------
+# API key rotation
+# ---------------------------------------------------------------------------
+
+class APIKeyRotator:
+    """Round-robin API key rotation with failure tracking.
+
+    On a 401/403/429 response, the current key is marked as "cooling down"
+    and the next key in the pool is selected. Keys cool down for 60 seconds.
+    """
+
+    COOLDOWN_SECONDS = 60.0
+
+    def __init__(self, keys: list[str] | None = None) -> None:
+        self._keys = keys if keys is not None else _resolve_api_key_pool()
+        self._index = 0
+        self._cooldowns: dict[int, float] = {}  # index → expiry monotonic time
+
+    @property
+    def current(self) -> str | None:
+        """Return the current active key, or None if pool is empty."""
+        if not self._keys:
+            return None
+        # Skip keys in cooldown
+        now = time.monotonic()
+        for _ in range(len(self._keys)):
+            idx = self._index % len(self._keys)
+            expiry = self._cooldowns.get(idx, 0.0)
+            if now >= expiry:
+                return self._keys[idx]
+            self._index += 1
+        # All in cooldown — return the first one anyway
+        return self._keys[0]
+
+    def mark_failure(self) -> str | None:
+        """Mark the current key as failing, rotate to next.
+
+        Returns the new active key, or None if pool is exhausted.
+        """
+        if not self._keys:
+            return None
+        current_idx = self._index % len(self._keys)
+        self._cooldowns[current_idx] = time.monotonic() + self.COOLDOWN_SECONDS
+        self._index += 1
+        return self.current
+
+    def reset(self) -> None:
+        """Clear all cooldowns."""
+        self._cooldowns.clear()
+        self._index = 0
+
+
+# Module-level singleton
+_key_rotator = APIKeyRotator()
+
+
+def get_key_rotator() -> APIKeyRotator:
+    """Return the module-level API key rotator (for testing/config)."""
+    return _key_rotator
 
 
 # ---------------------------------------------------------------------------
@@ -108,18 +262,34 @@ def _local_client() -> AsyncOpenAI:
     return AsyncOpenAI(base_url=url, api_key="not-needed", timeout=60.0)
 
 
-def _cloud_client() -> AsyncOpenAI:
-    url, _, key = _resolve_cloud()
-    if not key:
+def _cloud_client(key: str | None = None) -> AsyncOpenAI:
+    """Create a cloud NIM client, optionally with a specific API key.
+
+    If *key* is omitted, uses the key rotator's current key.
+    """
+    url, _, _ = _resolve_cloud()
+    api_key = key or _key_rotator.current
+    if not api_key:
         raise RuntimeError(
-            "Cloud LLM requested but HERMES_LITE_NVIDIA_API_KEY (or NVIDIA_API_KEY) not set"
+            "Cloud LLM requested but HERMES_LITE_NVIDIA_API_KEY "
+            "(or NVIDIA_API_KEY) not set"
         )
-    return AsyncOpenAI(base_url=url, api_key=key, timeout=120.0)
+    return AsyncOpenAI(base_url=url, api_key=api_key, timeout=120.0)
 
 
 # ---------------------------------------------------------------------------
 # Routing helpers
 # ---------------------------------------------------------------------------
+
+# Cloud prefixes — any model ID starting with these goes to the cloud endpoint.
+_CLOUD_PREFIXES = (
+    "nvidia/",
+    "minimaxai/",
+    "moonshotai/",
+    "qwen/",
+    "deepseek-ai/",
+    "stepfun-ai/",
+)
 
 
 def _pick_client_and_model(model: str) -> tuple[Callable[[], AsyncOpenAI], str, Tier]:
@@ -131,14 +301,17 @@ def _pick_client_and_model(model: str) -> tuple[Callable[[], AsyncOpenAI], str, 
     present.
 
     - ``local:<m>``                 → local client, model=``<m>``
-    - starts with ``nvidia/``/``minimaxai/``/``moonshotai/``/``qwen/``/``deepseek-ai/``
-      → cloud client, kept as-is
-    - bare model name              → local client
+    - starts with a cloud prefix    → cloud client, kept as-is
+    - bare model name (e.g. gguf)  → local client
+    - bare cloud-style name         → cloud client (fallback heuristic)
     """
     if model.startswith("local:"):
         bare = model[len("local:"):]
         return _local_client, bare, "local"
-    if model.startswith(("nvidia/", "minimaxai/", "moonshotai/", "qwen/", "deepseek-ai/")):
+    if model.startswith(_CLOUD_PREFIXES):
+        return _cloud_client, model, "cloud"
+    # Bare name — if it contains a / it's likely a cloud model id
+    if "/" in model:
         return _cloud_client, model, "cloud"
     return _local_client, model, "local"
 
@@ -214,19 +387,23 @@ def parse_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Chat
+# Chat — with rate limiting, retry, and key rotation
 # ---------------------------------------------------------------------------
 
 
 async def chat(req: ChatRequest) -> ChatResponse:
-    """Send ``req`` to the appropriate endpoint and return a normalised response."""
+    """Send ``req`` to the appropriate endpoint and return a normalised response.
+
+    For cloud requests:
+    - Respects the 40 RPM rate limit via token bucket
+    - Retries on 429/500/502/503 with exponential backoff
+    - Rotates API keys on auth/rate-limit errors
+    """
     client_factory, model, tier = _pick_client_and_model(req.model)
-    client = client_factory()
+    max_retries = int(os.environ.get("HERMES_LITE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
 
     # For local models, skip sending `tools` / `tool_choice` so llama-server
-    # does NOT build a PEG grammar.  Small local models (e.g. 3B Q4) fail
-    # to follow the grammar reliably, causing 500 errors.  Instead we parse
-    # tool calls from the free-form text output after the fact.
+    # does NOT build a PEG grammar.
     send_tools = bool(req.tools) and (tier != "local" or _LOCAL_TOOLS_ENABLED)
 
     kwargs: dict[str, Any] = {
@@ -240,7 +417,103 @@ async def chat(req: ChatRequest) -> ChatResponse:
         kwargs["tool_choice"] = req.tool_choice
     kwargs.update(req.extra)
 
+    # Cloud requests: rate limit + retry logic
+    if tier == "cloud":
+        return await _chat_cloud_with_retry(client_factory, kwargs, model, tier, req, max_retries)
+
+    # Local requests: simple call, no rate limit needed
+    client = client_factory()
     resp = await client.chat.completions.create(**kwargs)
+    return _parse_response(resp, model, tier, req, send_tools=False)
+
+
+async def _chat_cloud_with_retry(
+    client_factory: Callable[[], AsyncOpenAI],
+    kwargs: dict[str, Any],
+    model: str,
+    tier: Tier,
+    req: ChatRequest,
+    max_retries: int,
+) -> ChatResponse:
+    """Cloud chat with rate limiting, exponential backoff, and key rotation."""
+    from openai import (
+        APIStatusError,
+        APIConnectionError,
+        RateLimitError,
+        InternalServerError,
+    )
+
+    send_tools = bool(req.tools)
+    last_exc: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        # Rate limiter — wait for a token before each attempt
+        await _rate_limiter.acquire()
+
+        # Use the current key from the rotator
+        client = _cloud_client(key=_key_rotator.current)
+
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+            return _parse_response(resp, model, tier, req, send_tools=send_tools)
+
+        except RateLimitError as exc:
+            # 429 — rate limited; back off and rotate key
+            last_exc = exc
+            if attempt < max_retries:
+                backoff = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+                logger.warning(
+                    "cloud 429 (attempt %d/%d), backoff %.1fs, rotating key",
+                    attempt + 1, max_retries + 1, backoff,
+                )
+                new_key = _key_rotator.mark_failure()
+                if new_key:
+                    logger.info("rotated to key ending ...%s", new_key[-4:])
+                await asyncio.sleep(backoff)
+            continue
+
+        except (InternalServerError, APIConnectionError) as exc:
+            # 500/502/503 or connection error — back off, same key
+            last_exc = exc
+            if attempt < max_retries:
+                backoff = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+                logger.warning(
+                    "cloud %s (attempt %d/%d), backoff %.1fs",
+                    type(exc).__name__, attempt + 1, max_retries + 1, backoff,
+                )
+                await asyncio.sleep(backoff)
+            continue
+
+        except APIStatusError as exc:
+            # 401/403 — auth error; rotate key
+            if exc.status_code in (401, 403):
+                last_exc = exc
+                if attempt < max_retries:
+                    new_key = _key_rotator.mark_failure()
+                    logger.warning(
+                        "cloud auth error %d (attempt %d/%d), rotating key",
+                        exc.status_code, attempt + 1, max_retries + 1,
+                    )
+                    if new_key:
+                        logger.info("rotated to key ending ...%s", new_key[-4:])
+                    await asyncio.sleep(1.0)
+                continue
+            raise  # unrecoverable — re-raise
+
+    # All retries exhausted
+    raise last_exc or RuntimeError(
+        f"cloud request failed after {max_retries + 1} attempts"
+    )
+
+
+def _parse_response(
+    resp: Any,
+    model: str,
+    tier: Tier,
+    req: ChatRequest,
+    send_tools: bool,
+) -> ChatResponse:
+    """Parse an OpenAI response into a ChatResponse, handling tool calls."""
     choice = resp.choices[0]
     msg = choice.message
 
@@ -329,4 +602,10 @@ __all__ = [
     "_resolve_local",
     "_resolve_cloud",
     "_pick_client_and_model",
+    "RateLimiter",
+    "APIKeyRotator",
+    "get_rate_limiter",
+    "get_key_rotator",
+    "DEFAULT_RPM",
+    "DEFAULT_MAX_RETRIES",
 ]
