@@ -269,6 +269,8 @@ class MoAEngine:
         self.preset = preset or BUILTIN_PRESETS["council"]
         self.chat_fn = chat_fn or chat
         self.timeout_s = timeout_s or _DEFAULT_TIMEOUT_S
+        # Limit concurrent reference calls to avoid exhausting the 40 RPM token bucket
+        self._ref_semaphore = asyncio.Semaphore(2)
 
     # -- public API --------------------------------------------------------
 
@@ -346,8 +348,9 @@ class MoAEngine:
             )
 
         # Aggregator failed — return the best reference as degraded fallback
-        logger.warning("MoA: aggregator failed, returning first reference as fallback")
-        _, best_ref = ref_responses[0]
+        logger.warning("MoA: aggregator failed, returning best reference as fallback")
+        # Pick the longest non-empty reference response as the best fallback
+        best_ref = max(ref_responses, key=lambda x: len(x[1]))[1]
         return MoAResult(
             response=best_ref,
             reference_responses=ref_responses,
@@ -361,7 +364,7 @@ class MoAEngine:
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "refs_ok": len(ref_responses),
                 "refs_total": len(ref_models),
-                "fallback": "first_reference",
+                "fallback": "best_reference",
             },
         )
 
@@ -432,26 +435,28 @@ class MoAEngine:
         # Build a simple message list: original context + current prompt
         ref_messages = list(messages)
 
-        try:
-            resp: ChatResponse = await asyncio.wait_for(
-                self.chat_fn(ChatRequest(
-                    messages=ref_messages,
-                    model=config.model,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens or self.preset.max_tokens,
-                )),
-                timeout=self.timeout_s,
-            )
-            return (config.model, resp.content or "", True)
-        except asyncio.TimeoutError:
-            logger.warning("MoA reference %s timed out after %.0fs", config.model, self.timeout_s)
-            return (config.model, "", False)
-        except Exception as exc:
-            logger.warning(
-                "MoA reference %s error: %s: %s",
-                config.model, type(exc).__name__, exc,
-            )
-            return (config.model, "", False)
+        # Limit concurrent calls to avoid rate-limit exhaustion
+        async with self._ref_semaphore:
+            try:
+                resp: ChatResponse = await asyncio.wait_for(
+                    self.chat_fn(ChatRequest(
+                        messages=ref_messages,
+                        model=config.model,
+                        temperature=config.temperature,
+                        max_tokens=config.max_tokens or self.preset.max_tokens,
+                    )),
+                    timeout=self.timeout_s,
+                )
+                return (config.model, resp.content or "", True)
+            except asyncio.TimeoutError:
+                logger.warning("MoA reference %s timed out after %.0fs", config.model, self.timeout_s)
+                return (config.model, "", False)
+            except Exception as exc:
+                logger.warning(
+                    "MoA reference %s error: %s: %s",
+                    config.model, type(exc).__name__, exc,
+                )
+                return (config.model, "", False)
 
     async def _run_aggregator(
         self,
