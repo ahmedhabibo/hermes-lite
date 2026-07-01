@@ -52,6 +52,21 @@ from hermes_lite.subagent import (
     SUBAGENT_WALL_TIMEOUT_S,
     SUBAGENT_SYSTEM_PROMPT,
 )
+from hermes_lite.llm import (
+    ChatRequest,
+    ChatResponse,
+    Tier,
+    chat,
+    tool_def,
+    parse_tool_calls_from_text,
+    RateLimiter,
+    APIKeyRotator,
+    AllKeysExhausted,
+    get_rate_limiter,
+    get_key_rotator,
+    DEFAULT_RPM,
+    DEFAULT_MAX_RETRIES,
+)
 from hermes_lite.moa import (
     MoAEngine,
     MoAPreset,
@@ -92,6 +107,20 @@ __all__ = [
     "HermesOrchestrator",
     "run_cli",
     "PromptHandler",
+    # LLM layer
+    "ChatRequest",
+    "ChatResponse",
+    "Tier",
+    "chat",
+    "tool_def",
+    "parse_tool_calls_from_text",
+    "RateLimiter",
+    "APIKeyRotator",
+    "AllKeysExhausted",
+    "get_rate_limiter",
+    "get_key_rotator",
+    "DEFAULT_RPM",
+    "DEFAULT_MAX_RETRIES",
     # 6 essentials
     "register_builtins",
     "ESSENTIAL_TOOL_NAMES",

@@ -13,6 +13,7 @@ Key components:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -21,6 +22,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 from hermes_lite.registry import (
     PluginRegistry,
@@ -40,7 +43,7 @@ from hermes_lite.memory import (
     create_session,
     get_session,
 )
-from hermes_lite.llm import ChatRequest, ChatResponse, chat, tool_def, Tier
+from hermes_lite.llm import ChatRequest, ChatResponse, chat, tool_def, Tier, AllKeysExhausted
 from hermes_lite.cli import run_cli
 from hermes_lite.router import LiteRouter, RoutingDecision
 from hermes_lite.tools_builtins import register_builtins as _register_essentials
@@ -793,37 +796,115 @@ class HermesOrchestrator:
 
             if self.active_moa_preset is not None:
                 # MoA path — run reference models, then aggregator
-                moa_engine = MoAEngine(preset=self.active_moa_preset)
-                moa_messages = await self._build_llm_history(prompt)
-                moa_result: MoAResult = await moa_engine.run(
-                    messages=moa_messages,
-                    prompt=prompt,
-                )
-                response = format_moa_result(moa_result)
+                try:
+                    moa_engine = MoAEngine(preset=self.active_moa_preset)
+                    moa_messages = await self._build_llm_history(prompt)
+                    moa_result: MoAResult = await moa_engine.run(
+                        messages=moa_messages,
+                        prompt=prompt,
+                    )
+                    response = format_moa_result(moa_result)
 
-                # Persist MoA metadata
-                routing_meta["moa"] = {
-                    "preset": moa_result.metadata.get("preset"),
-                    "refs_ok": moa_result.metadata.get("refs_ok"),
-                    "refs_total": moa_result.metadata.get("refs_total"),
-                    "agg_model": moa_result.aggregator_model,
-                    "terminated_by": moa_result.terminated_by,
-                }
+                    # Persist MoA metadata
+                    routing_meta["moa"] = {
+                        "preset": moa_result.metadata.get("preset"),
+                        "refs_ok": moa_result.metadata.get("refs_ok"),
+                        "refs_total": moa_result.metadata.get("refs_total"),
+                        "agg_model": moa_result.aggregator_model,
+                        "terminated_by": moa_result.terminated_by,
+                    }
 
-                # Observability: log the turn
-                log_turn(
-                    turn_id=uuid.uuid4().hex[:16],
-                    tier="cloud",
-                    model=moa_result.aggregator_model,
-                    errors=[r.error for r in moa_result.reference_results if r.error],
-                )
+                    # Observability: log the turn
+                    log_turn(
+                        turn_id=uuid.uuid4().hex[:16],
+                        tier="cloud",
+                        model=moa_result.aggregator_model,
+                        errors=[r.error for r in moa_result.reference_results if r.error],
+                    )
+                except AllKeysExhausted as exc:
+                    logger.warning("MoA: all API keys exhausted (%s), falling back to local ToolLoop", exc)
+                    # Fall back to local ToolLoop
+                    loop_result = await self.tool_loop.run(
+                        messages=await self._build_llm_history(prompt),
+                        model=decision.model_id,
+                    )
+                    # Build the user-facing response with transparency info
+                    tier_emoji = "⚡" if decision.tier == "local" else "☁️"
+                    parts = []
+                    if loop_result.tool_names:
+                        tool_summary = ", ".join(
+                            f"`{n}`" for n in _dedupe(loop_result.tool_names)
+                        )
+                        parts.append(
+                            f"{tier_emoji} _{decision.tier}_ · "
+                            f"{loop_result.iterations} turn(s) · tools: {tool_summary}"
+                        )
+                    else:
+                        parts.append(
+                            f"{tier_emoji} _{decision.tier}_ · "
+                            f"{loop_result.iterations} turn(s)"
+                        )
+                    if loop_result.terminated_by != "complete":
+                        parts.append(f"_⚠ Loop ended: {loop_result.terminated_by}_")
+                    parts.append("")  # blank line
+                    parts.append(loop_result.response)
+                    response = "\n".join(parts)
+
+                    # Persist each tool-call and tool-result to memory
+                    for i, tn in enumerate(loop_result.tool_names):
+                        await self._save_message("tool", f"called {tn}", metadata={"tool_index": i})
+                    # Save the loop outcome metadata for the assistant message
+                    routing_meta["tool_loop"] = {
+                        "iterations": loop_result.iterations,
+                        "tool_calls_made": loop_result.tool_calls_made,
+                        "tool_names": loop_result.tool_names,
+                        "terminated_by": loop_result.terminated_by,
+                    }
+
+                    # Record the actual LLM outcome back into the router
+                    self.router.record_outcome(
+                        decision,
+                        succeeded=(loop_result.terminated_by in ("complete", "repeated_error")),
+                        tool_calls_malformed=(loop_result.terminated_by == "malformed_tool_call"),
+                    )
+
+                    # Observability: log the turn (T12)
+                    _obs = loop_result.metadata.get("_obs", {})
+                    log_turn(
+                        turn_id=uuid.uuid4().hex[:16],
+                        tier=decision.tier,
+                        model=decision.model_id,
+                        prompt_tokens=_obs.get("prompt_tokens", 0),
+                        completion_tokens=_obs.get("completion_tokens", 0),
+                        elapsed_ms=_obs.get("elapsed_ms", 0),
+                        tools_called=list(_dedupe(loop_result.tool_names)),
+                        errors=_obs.get("errors", []),
+                    )
 
             else:
                 # Normal ToolLoop path
-                loop_result = await self.tool_loop.run(
-                    messages=await self._build_llm_history(prompt),
-                    model=decision.model_id,
-                )
+                try:
+                    loop_result = await self.tool_loop.run(
+                        messages=await self._build_llm_history(prompt),
+                        model=decision.model_id,
+                    )
+                except AllKeysExhausted as exc:
+                    logger.warning("ToolLoop: all API keys exhausted (%s), returning graceful error", exc)
+                    response = (
+                        f"⚠ All API keys exhausted. "
+                        f"Earliest key available in {exc.cooldown_remaining:.0f}s. "
+                        f"Try again later or set HERMES_LITE_LOCAL_MODEL for local fallback."
+                    )
+                    # Save assistant response with error metadata
+                    await self._save_message(
+                        "assistant",
+                        response,
+                        metadata={
+                            "tool_called": False,
+                            "routing": {"error": "all_keys_exhausted", "cooldown_remaining": exc.cooldown_remaining},
+                        },
+                    )
+                    return response
 
                 # Build the user-facing response with transparency info
                 tier_emoji = "⚡" if decision.tier == "local" else "☁️"

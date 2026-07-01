@@ -163,6 +163,24 @@ def get_rate_limiter() -> RateLimiter:
 # API key rotation
 # ---------------------------------------------------------------------------
 
+class AllKeysExhausted(Exception):
+    """Raised when all API keys in the pool are rate-limited or auth-failed.
+
+    This is a recoverable condition — the orchestrator should catch this
+    and fall back to local model or return a graceful error message.
+    """
+
+    __slots__ = ("keys_tried", "cooldown_remaining")
+
+    def __init__(self, keys_tried: int, cooldown_remaining: float):
+        self.keys_tried = keys_tried
+        self.cooldown_remaining = cooldown_remaining
+        super().__init__(
+            f"All {keys_tried} API keys exhausted. "
+            f"Earliest key available in {cooldown_remaining:.0f}s."
+        )
+
+
 class APIKeyRotator:
     """Round-robin API key rotation with failure tracking.
 
@@ -204,6 +222,27 @@ class APIKeyRotator:
         self._cooldowns[current_idx] = time.monotonic() + self.COOLDOWN_SECONDS
         self._index += 1
         return self.current
+
+    def is_exhausted(self) -> tuple[bool, float]:
+        """Check if all keys are currently in cooldown.
+
+        Returns (exhausted, cooldown_remaining_seconds).
+        If exhausted, cooldown_remaining is the time until the earliest key recovers.
+        """
+        if not self._keys:
+            return True, 0.0
+        now = time.monotonic()
+        earliest_expiry = float("inf")
+        all_in_cooldown = True
+        for idx in range(len(self._keys)):
+            expiry = self._cooldowns.get(idx, 0.0)
+            if now < expiry:
+                earliest_expiry = min(earliest_expiry, expiry)
+            else:
+                all_in_cooldown = False
+        if all_in_cooldown:
+            return True, max(0.0, earliest_expiry - now)
+        return False, 0.0
 
     def reset(self) -> None:
         """Clear all cooldowns."""
@@ -398,6 +437,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     - Respects the 40 RPM rate limit via token bucket
     - Retries on 429/500/502/503 with exponential backoff
     - Rotates API keys on auth/rate-limit errors
+    - Falls back to local model if all API keys are exhausted
     """
     client_factory, model, tier = _pick_client_and_model(req.model)
     max_retries = int(os.environ.get("HERMES_LITE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
@@ -419,7 +459,16 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     # Cloud requests: rate limit + retry logic
     if tier == "cloud":
-        return await _chat_cloud_with_retry(client_factory, kwargs, model, tier, req, max_retries)
+        try:
+            return await _chat_cloud_with_retry(client_factory, kwargs, model, tier, req, max_retries)
+        except AllKeysExhausted as exc:
+            logger.warning("All API keys exhausted (%s), falling back to local", exc)
+            # Fall back to local model
+            local_url, local_model = _resolve_local()
+            local_client = AsyncOpenAI(base_url=local_url, api_key="not-needed", timeout=60.0)
+            kwargs["model"] = local_model
+            resp = await local_client.chat.completions.create(**kwargs)
+            return _parse_response(resp, local_model, "local", req, send_tools=False)
 
     # Local requests: simple call, no rate limit needed
     client = client_factory()
@@ -447,6 +496,11 @@ async def _chat_cloud_with_retry(
     last_exc: Exception | None = None
 
     for attempt in range(max_retries + 1):
+        # Check if all keys are exhausted BEFORE attempting
+        exhausted, cooldown_remaining = _key_rotator.is_exhausted()
+        if exhausted:
+            raise AllKeysExhausted(len(_key_rotator._keys), cooldown_remaining)
+
         # Rate limiter — wait for a token before each attempt
         await _rate_limiter.acquire()
 
@@ -604,6 +658,7 @@ __all__ = [
     "_pick_client_and_model",
     "RateLimiter",
     "APIKeyRotator",
+    "AllKeysExhausted",
     "get_rate_limiter",
     "get_key_rotator",
     "DEFAULT_RPM",
