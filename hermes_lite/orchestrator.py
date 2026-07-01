@@ -31,6 +31,7 @@ from hermes_lite.registry import (
     ToolError,
     ToolNotFoundError,
     ToolValidationError,
+    ToolAuthError,
 )
 from hermes_lite.memory import (
     AsyncSQLitePool,
@@ -312,7 +313,7 @@ class ToolLoop:
                         self.on_tool_call(tc_name, first_arg)
 
                     try:
-                        raw = self.registry.call_tool(tc_name, args)
+                        raw = self.registry.call_tool(tc_name, args, auth_token=self.registry.auth_token)
                         if isinstance(raw, dict) and raw.get("ok"):
                             result_content = raw.get("output", "")
                         elif isinstance(raw, dict) and not raw.get("ok"):
@@ -456,12 +457,17 @@ class HermesOrchestrator:
         session_title: str = "Hermes-Lite Session",
         router: LiteRouter | None = None,
         tool_loop: ToolLoop | None = None,
+        auth_token: str | None = None,
     ) -> None:
         self.db_path = str(Path(db_path).expanduser())
         self.session_title = session_title
         self.session_id: str = ""
         self.pool: AsyncSQLitePool | None = None
-        self.registry = PluginRegistry(strict_validation=True)
+        # Read auth token from env if not provided
+        if auth_token is None:
+            auth_token = os.environ.get("HERMES_LITE_AUTH_TOKEN")
+        self.auth_token = auth_token
+        self.registry = PluginRegistry(strict_validation=True, auth_token=auth_token)
         # Routing controller picks local vs cloud before any LLM call.
         # None means "construct a default LiteRouter inside handle_prompt"
         # so existing tests that don't care about routing keep working,
@@ -618,9 +624,9 @@ class HermesOrchestrator:
                     tool_name = prompt[1:].strip()
                     args = {}
 
-                tool_result = self.registry.call_tool(tool_name, args)
+                tool_result = self.registry.call_tool(tool_name, args, auth_token=self.registry.auth_token)
                 response = f"**Tool: {tool_name}**\n\nResult: {tool_result}"
-            except (ToolNotFoundError, ToolValidationError, ToolError, json.JSONDecodeError) as exc:
+            except (ToolNotFoundError, ToolValidationError, ToolAuthError, ToolError, json.JSONDecodeError) as exc:
                 response = f"**Tool error:** {exc}"
 
         # Check for system/internal commands

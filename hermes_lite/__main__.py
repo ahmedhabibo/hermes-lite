@@ -5,10 +5,12 @@ Run with::
     hermes-lite              # Interactive shell
     hermes-lite stats        # Per-turn observability table
     hermes-lite --version    # Print version and exit
+    hermes-lite --auth-token <token>  # Set auth token for dangerous tools
     python -m hermes_lite    # Same as hermes-lite
 """
 
 import sys
+import os
 
 
 def _main() -> None:
@@ -22,6 +24,22 @@ def _main() -> None:
         print(f"hermes-lite {v}")
         return
 
+    # --auth-token flag
+    auth_token = None
+    if "--auth-token" in sys.argv:
+        try:
+            idx = sys.argv.index("--auth-token")
+            if idx + 1 < len(sys.argv):
+                auth_token = sys.argv[idx + 1]
+                # Remove the flag and its value from sys.argv
+                sys.argv.pop(idx)  # --auth-token
+                sys.argv.pop(idx)  # token value
+            else:
+                print("Error: --auth-token requires a value", file=sys.stderr)
+                sys.exit(1)
+        except ValueError:
+            pass
+
     if len(sys.argv) > 1 and sys.argv[1] == "stats":
         from hermes_lite.observability import print_stats
         print_stats()
@@ -30,7 +48,7 @@ def _main() -> None:
     # Default: launch the orchestrator shell
     from hermes_lite.orchestrator import HermesOrchestrator
 
-    orchestrator = HermesOrchestrator()
+    orchestrator = HermesOrchestrator(auth_token=auth_token)
     orchestrator.start()
 
 

@@ -1,6 +1,13 @@
 """Hermes-Lite: Lightweight tool-execution framework for LLM agents."""
 
-from hermes_lite.registry import PluginRegistry, ToolDefinition, ToolError, ToolNotFoundError, ToolValidationError
+from hermes_lite.registry import (
+    PluginRegistry,
+    ToolDefinition,
+    ToolError,
+    ToolNotFoundError,
+    ToolValidationError,
+    ToolAuthError,
+)
 from hermes_lite.memory import (
     AsyncSQLitePool,
     ensure_schema,
@@ -85,6 +92,7 @@ __all__ = [
     "ToolError",
     "ToolNotFoundError",
     "ToolValidationError",
+    "ToolAuthError",
     "AsyncSQLitePool",
     "ensure_schema",
     "create_session",

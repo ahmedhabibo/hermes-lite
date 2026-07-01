@@ -423,6 +423,7 @@ def _definitions() -> list[ToolDefinition]:
             ),
             schema_model=ReadFileArgs,
             handler=_handle_read_file,
+            dangerous=True,
         ),
         ToolDefinition(
             name="search_files",
@@ -432,6 +433,7 @@ def _definitions() -> list[ToolDefinition]:
             ),
             schema_model=SearchFilesArgs,
             handler=_handle_search_files,
+            dangerous=True,
         ),
         ToolDefinition(
             name="terminal",
@@ -441,6 +443,7 @@ def _definitions() -> list[ToolDefinition]:
             ),
             schema_model=TerminalArgs,
             handler=_handle_terminal,
+            dangerous=True,
         ),
         ToolDefinition(
             name="memory",
@@ -450,6 +453,7 @@ def _definitions() -> list[ToolDefinition]:
             ),
             schema_model=MemoryArgs,
             handler=_handle_memory,
+            dangerous=False,
         ),
         ToolDefinition(
             name="web_search",
@@ -458,6 +462,7 @@ def _definitions() -> list[ToolDefinition]:
             ),
             schema_model=WebSearchArgs,
             handler=_handle_web_search,
+            dangerous=True,
         ),
         ToolDefinition(
             name="web_fetch",
@@ -466,6 +471,7 @@ def _definitions() -> list[ToolDefinition]:
             ),
             schema_model=WebFetchArgs,
             handler=_handle_web_fetch,
+            dangerous=True,
         ),
     ]
 

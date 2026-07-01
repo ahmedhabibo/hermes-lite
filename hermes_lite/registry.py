@@ -24,6 +24,15 @@ class ToolError(Exception):
     """Base exception for all tool-related errors."""
 
 
+class ToolAuthError(ToolError):
+    """Raised when tool execution is blocked due to missing/invalid auth token."""
+
+    def __init__(self, tool_name: str, message: str | None = None) -> None:
+        self.tool_name = tool_name
+        msg = message or f"Tool '{tool_name}' requires authentication. Set HERMES_LITE_AUTH_TOKEN or use --auth-token."
+        super().__init__(msg)
+
+
 class ToolNotFoundError(ToolError):
     """Raised when a requested tool name is not registered."""
 
@@ -61,12 +70,17 @@ class ToolDefinition:
         handler: Callable that implements the tool.  If *schema_model* is
             ``None`` the handler is called with no positional/keyword args;
             otherwise it receives the validated Pydantic model instance.
+        dangerous: If ``True``, this tool requires authentication when
+            ``PluginRegistry.auth_token`` is set.  Default ``False``.
+            Mark tools that can read/write files, execute commands, or
+            access external resources as dangerous.
     """
 
     name: str
     description: str
     schema_model: type[BaseModel] | None = None
     handler: Callable[..., Any] | None = None
+    dangerous: bool = False
 
     def __post_init__(self) -> None:
         """Light validation on construction -- catches obvious typos early."""
@@ -182,11 +196,18 @@ class PluginRegistry:
 
         # Dispatch
         result = registry.call_tool("web_search", {"query": "hello", "max_results": 10})
+
+    Authentication:
+        If ``auth_token`` is provided (via constructor or ``HERMES_LITE_AUTH_TOKEN``
+        env var), tools marked ``dangerous=True`` will require the token to be
+        passed at dispatch time via the ``auth_token`` kwarg.  If the token
+        doesn't match, ``ToolAuthError`` is raised.
     """
 
-    def __init__(self, strict_validation: bool = True) -> None:
+    def __init__(self, strict_validation: bool = True, auth_token: str | None = None) -> None:
         self._tools: dict[str, ToolDefinition] = {}
         self._strict = strict_validation
+        self.auth_token = auth_token  # None = no auth required
 
     # -- registration ---------------------------------------------------
 
@@ -250,16 +271,24 @@ class PluginRegistry:
         self,
         name: str,
         args: dict[str, Any] | None = None,
+        auth_token: str | None = None,
     ) -> Any:
         """Validate and call a tool by name.
 
         1. Looks up the tool (``ToolNotFoundError`` if missing).
         2. Validates *args* against the tool's schema (``ToolValidationError``).
-        3. Invokes the handler with the validated model instance.
+        3. If tool is dangerous and registry has auth_token, checks auth_token matches.
+        4. Invokes the handler with the validated model instance.
 
         Returns whatever the handler returns.
         """
         definition = self.get_tool(name)
+
+        # Auth check for dangerous tools
+        if definition.dangerous and self.auth_token is not None:
+            if auth_token != self.auth_token:
+                raise ToolAuthError(name)
+
         validated = definition.validate_args(args)
 
         if definition.handler is None:

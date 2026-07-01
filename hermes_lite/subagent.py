@@ -495,6 +495,7 @@ def register_subagent_tool(
         ),
         schema_model=SubagentArgs,
         handler=_subagent_handler,
+        dangerous=True,
     )
     if registry.has_tool(SUBAGENT_TOOL_NAME):
         registry.remove_tool(SUBAGENT_TOOL_NAME)
