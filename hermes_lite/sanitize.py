@@ -26,9 +26,9 @@ logger = logging.getLogger(__name__)
 # Known LLM control / special tokens used for prompt injection.
 # These are stripped from user prompts before they reach the LLM.
 _CONTROL_TOKEN_PATTERNS = [
-    r"<\|system\|>.*?<\|/system\|>",
-    r"<\|user\|>.*?<\|/user\|>",
-    r"<\|assistant\|>.*?<\|/assistant\|>",
+    r"<\|system\|>.*?</\|system\|>",
+    r"<\|user\|>.*?</\|user\|>",
+    r"<\|assistant\|>.*?</\|assistant\|>",
     r"<\|endoftext\|>",
     r"<\|end\|>",
     r"<\|im_start\|>.*?<\|im_end\|>",
@@ -37,8 +37,8 @@ _CONTROL_TOKEN_PATTERNS = [
     r"<\|reserved_\d+\|>",
     r"\[INST\].*?\[/INST\]",
     r"<<SYS>>.*?<</SYS>>",
-    r"<s>",
-    r"</s>",
+    r"<\|begin_of_text\|>",
+    r"<\|end_of_text\|>",
 ]
 
 # Compile the combined regex once.
@@ -66,7 +66,7 @@ _PATH_BLACKLIST = {
 }
 
 # Characters that look suspicious in a path.
-_PATH_SUSPICIOUS = re.compile(r"[;|`$&\{\}\(\)]")
+_PATH_SUSPICIOUS = re.compile(r"[;|`$&\\{\\}\\(\\)]")
 
 # Maximum path length (arbitrary sanity limit).
 _MAX_PATH_LEN = 4096
@@ -76,10 +76,14 @@ _MAX_PATH_LEN = 4096
 # Shell-injection detection
 # ---------------------------------------------------------------------------
 
-_SHELL_METACHAR_RE = re.compile(r"[;|`$&\(\)\{\}\[\]<>#*?]|")
+_SHELL_METACHAR_RE = re.compile(r"[;|`$&\(\)\{\}\[\]<>#*?]")
 
 # Whitelist of safe shell commands (base names only).
-_SAFE_COMMANDS = {"ls", "cat", "echo", "grep", "wc", "head", "tail", "find", "sort", "uniq", "pwd", "cd", "mkdir", "touch", "rm", "cp", "mv", "chmod", "chown", "ps", "df", "du", "top", "htop", "git", "python", "python3", "pip", "pip3"}
+_SAFE_COMMANDS = {
+    "ls", "cat", "echo", "grep", "wc", "head", "tail", "find", "sort", "uniq",
+    "pwd", "cd", "mkdir", "touch", "rm", "cp", "mv", "chmod", "chown", "ps",
+    "df", "du", "top", "htop", "git", "python", "python3", "pip", "pip3"
+}
 
 # ---------------------------------------------------------------------------
 # Result dataclass
@@ -137,8 +141,8 @@ def strip_control_tokens(text: str) -> str:
 def validate_path(path_str: str, strict: bool = True) -> str:
     """Validate a file path for traversal and suspicious characters.
 
-    * ``strict=True`` (default) → raises on any violation.
-    * ``strict=False`` → returns cleaned path, logs warnings.
+    * ``strict=True`` (default) -> raises on any violation.
+    * ``strict=False`` -> returns cleaned path, logs warnings.
     """
     if not path_str:
         if strict:
@@ -174,8 +178,8 @@ def validate_path(path_str: str, strict: bool = True) -> str:
 def validate_shell(command: str, strict: bool = True) -> str:
     """Validate a shell command for injection attacks.
 
-    * ``strict=True`` (default) → raises on suspicious input.
-    * ``strict=False`` → logs warning, returns cleaned command.
+    * ``strict=True`` (default) -> raises on suspicious input.
+    * ``strict=False`` -> logs warning, returns cleaned command.
     """
     if not command:
         if strict:
@@ -201,8 +205,8 @@ def sanitize_tool_args(tool_name: str, args: dict, strict: bool = True) -> Sanit
     Currently handles:
     - ``read_file`` / ``search_files``: validates ``path`` argument
     - ``terminal``: validates ``command`` argument
-    - ``memory`` / ``web_search`` / ``web_fetch``: scrubs prompt for control tokens
     - ``subagent``: scrubs ``task`` argument for control tokens
+    - Default: scrubs control tokens from string values
 
     Returns a :class:`SanitizationResult` with ``is_clean``, ``args``, and ``issues``.
     """
@@ -289,7 +293,8 @@ def sanitize_moa_reference(text: str, replacement: str = "[REDACTED]") -> str:
 def sanitize_moa_aggregator_prompt(prompt: str) -> str:
     """Sanitize the aggregator's own prompt before sending to the LLM.
 
-    Mostly ensures no control tokens leaked from reference outputs."""
+    Mostly ensures no control tokens leaked from reference outputs.
+    """
     return scrub_control_tokens(prompt)
 
 
