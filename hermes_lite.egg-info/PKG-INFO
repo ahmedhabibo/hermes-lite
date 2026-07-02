@@ -1,13 +1,17 @@
 Metadata-Version: 2.4
 Name: hermes-lite
-Version: 0.2.0
-Summary: Hermes Lite — lightweight agent framework with tool registry, SQLite memory, and orchestration
+Version: 0.5.0
+Summary: Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. MoA orchestration, rate limiting, key rotation, cloud fallback chain, local fallback for offline use.
 Requires-Python: >=3.9
+License-File: LICENSE
 Requires-Dist: pydantic>=2.0
 Requires-Dist: aiosqlite>=0.20.0
 Requires-Dist: prompt-toolkit>=3.0.0
 Requires-Dist: rich>=13.0.0
 Requires-Dist: openai>=1.40.0
+Provides-Extra: stripe
+Requires-Dist: stripe>=7.0.0; extra == "stripe"
 Provides-Extra: test
 Requires-Dist: pytest>=7.0; extra == "test"
 Requires-Dist: pytest-asyncio>=0.21.0; extra == "test"
+Dynamic: license-file

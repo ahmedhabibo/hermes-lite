@@ -66,6 +66,7 @@ try:
 except Exception:
     __version__ = "0.5.0"
 
+from hermes_lite.sanitize import sanitize_tool_args
 
 # ---------------------------------------------------------------------------
 # Built-in tools are now provided by :mod:`hermes_lite.tools_builtins`.
@@ -313,7 +314,21 @@ class ToolLoop:
                         self.on_tool_call(tc_name, first_arg)
 
                     try:
-                        raw = self.registry.call_tool(tc_name, args, auth_token=self.registry.auth_token)
+                        # Sanitize tool arguments before dispatch
+                        sanitized = sanitize_tool_args(tool_name=tc_name, args=args)
+                        if not sanitized.is_clean:
+                            issues = "; ".join(sanitized.issues)
+                            self.logger.warning(f"[SANITIZE] '{tc_name}' blocked: {issues}")
+                            result_content = f"Tool call blocked: security policy violation — {issues}"
+                            turn_errors.append(f"{tc_name}: {issues}")
+                            tool_response_data = {
+                                "role": "tool_response",
+                                "name": tc_name,
+                                "output": result_content,
+                            }
+                            continue
+
+                        raw = self.registry.call_tool(tc_name, sanitized.args, auth_token=self.registry.auth_token)
                         if isinstance(raw, dict) and raw.get("ok"):
                             result_content = raw.get("output", "")
                         elif isinstance(raw, dict) and not raw.get("ok"):
@@ -484,6 +499,9 @@ class HermesOrchestrator:
         # Ensure parent directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
+        # Logger for this instance
+        self.logger = logging.getLogger(__name__)
+
     def _create_default_tools(self) -> None:
         """Register the 6 essential tools via hermes_lite.tools_builtins,
         then add the subagent tool (single-shot delegated LLM calls).
@@ -624,8 +642,15 @@ class HermesOrchestrator:
                     tool_name = prompt[1:].strip()
                     args = {}
 
-                tool_result = self.registry.call_tool(tool_name, args, auth_token=self.registry.auth_token)
-                response = f"**Tool: {tool_name}**\n\nResult: {tool_result}"
+                # Sanitize tool arguments before dispatch
+                sanitized = sanitize_tool_args(tool_name=tool_name, args=args)
+                if not sanitized.is_clean:
+                    issues = "; ".join(sanitized.issues)
+                    self.logger.warning(f"[SANITIZE] '{tool_name}' blocked: {issues}")
+                    response = f"Tool call blocked: security policy violation — {issues}"
+                else:
+                    tool_result = self.registry.call_tool(tool_name, sanitized.args, auth_token=self.registry.auth_token)
+                    response = f"**Tool: {tool_name}**\n\nResult: {tool_result}"
             except (ToolNotFoundError, ToolValidationError, ToolAuthError, ToolError, json.JSONDecodeError) as exc:
                 response = f"**Tool error:** {exc}"
 
