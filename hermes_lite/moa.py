@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 from hermes_lite.llm import ChatRequest, ChatResponse, chat, Tier
+from hermes_lite.sanitize import sanitize_moa_reference, sanitize_moa_aggregator_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -492,7 +493,8 @@ class MoAEngine:
         # Add reference outputs
         ref_block_parts = []
         for i, (model_id, response) in enumerate(ref_responses, 1):
-            ref_block_parts.append(f"**Reference {i} ({model_id}):**\n{response}")
+            safe_response = sanitize_moa_reference(response)
+            ref_block_parts.append(f"**Reference {i} ({model_id}):**\n{safe_response}")
         ref_block = "\n\n---\n\n".join(ref_block_parts)
 
         agg_messages.append({
@@ -506,14 +508,16 @@ class MoAEngine:
                 agg_messages.append(msg)
 
         # Add the reference outputs as a "system" context message
+        aggregator_content = (
+            f"Here are the reference model responses:\n\n"
+            f"{ref_block}\n\n"
+            f"---\n\n"
+            f"Now synthesise a comprehensive response to my original question: {original_prompt}"
+        )
+        safe_aggregator_content = sanitize_moa_aggregator_prompt(aggregator_content)
         agg_messages.append({
             "role": "user",
-            "content": (
-                f"Here are the reference model responses:\n\n"
-                f"{ref_block}\n\n"
-                f"---\n\n"
-                f"Now synthesise a comprehensive response to my original question: {original_prompt}"
-            ),
+            "content": safe_aggregator_content,
         })
 
         try:
