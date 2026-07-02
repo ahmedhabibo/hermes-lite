@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-lite"
-version = "0.5.0"
-description = "Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. MoA orchestration, rate limiting, key rotation, cloud fallback chain, local fallback for offline use."
+version = "0.6.0"
+description = "Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. MoA orchestration, rate limiting with per-key buckets and jittered backoff, key rotation, cloud fallback chain, local fallback for offline use."
 requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.0",

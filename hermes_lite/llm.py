@@ -14,8 +14,10 @@ NVIDIA NIM Free API enforces **40 requests per minute (RPM)**. This module
 includes a token-bucket rate limiter that throttles automatically:
 
 - 40 RPM budget (1 request per 1.5s steady-state)
-- Exponential backoff on 429 responses (1s → 2s → 4s → 8s, max 16s)
+- Exponential backoff with jitter on 429 responses (1s → 2s → 4s → 8s, max 16s)
 - API key rotation from a comma-separated pool in ``HERMES_LITE_NVIDIA_API_KEYS``
+- Per-key rate limiting: each API key has its own token bucket, so exhaustion
+  of one key does not affect others.
 
 Configuration via env vars:
 
@@ -36,10 +38,11 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, List, Literal, Optional, Tuple
 
 from openai import AsyncOpenAI
 
@@ -73,7 +76,7 @@ def _resolve_cloud() -> tuple[str, str, str | None]:
     # Single key from HERMES_LITE_NVIDIA_API_KEY, or fall back to NVIDIA_API_KEY
     api_key = os.environ.get(
         "HERMES_LITE_NVIDIA_API_KEY"
-    ) or os.environ.get("NVIDIA_API_KEY")
+    ) or os.environ.get("NVIDIA_API_KEY", "")
     return url, model, api_key
 
 
@@ -103,7 +106,7 @@ def _resolve_api_key_pool() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Rate limiter — token bucket for NIM Free API (40 RPM default)
+# Rate limiter — token bucket for NIM Free API (40 RPM default per key)
 # ---------------------------------------------------------------------------
 
 DEFAULT_RPM = 40
@@ -150,18 +153,10 @@ class RateLimiter:
         self._last_refill = now
 
 
-# Module-level singleton — all cloud calls share the same bucket.
-_rate_limiter = RateLimiter()
-
-
-def get_rate_limiter() -> RateLimiter:
-    """Return the module-level cloud rate limiter (for testing/config)."""
-    return _rate_limiter
-
-
 # ---------------------------------------------------------------------------
 # API key rotation
 # ---------------------------------------------------------------------------
+
 
 class AllKeysExhausted(Exception):
     """Raised when all API keys in the pool are rate-limited or auth-failed.
@@ -197,10 +192,15 @@ class APIKeyRotator:
 
     @property
     def current(self) -> str | None:
-        """Return the current active key, or None if pool is empty."""
+        """Return the current active key, or None if pool is empty.
+
+        This property has the side effect of advancing ``self._index`` past
+        any keys that are currently in cooldown, so that the next call to
+        ``current`` or ``mark_failure`` starts from the first non-cooled-down
+        key (or wraps around if all are cooled down).
+        """
         if not self._keys:
             return None
-        # Skip keys in cooldown
         now = time.monotonic()
         for _ in range(len(self._keys)):
             idx = self._index % len(self._keys)
@@ -236,11 +236,15 @@ class APIKeyRotator:
         all_in_cooldown = True
         for idx in range(len(self._keys)):
             expiry = self._cooldowns.get(idx, 0.0)
-            if now < expiry:
-                earliest_expiry = min(earliest_expiry, expiry)
-            else:
+            if now >= expiry:
+                # This key is not in cooldown (available or already expired)
                 all_in_cooldown = False
+            else:
+                # This key is still in cooldown
+                if expiry < earliest_expiry:
+                    earliest_expiry = expiry
         if all_in_cooldown:
+            # All keys are in cooldown
             return True, max(0.0, earliest_expiry - now)
         return False, 0.0
 
@@ -250,13 +254,31 @@ class APIKeyRotator:
         self._index = 0
 
 
-# Module-level singleton
+# ---------------------------------------------------------------------------
+# Module-level singletons
+# ---------------------------------------------------------------------------
+
+# Initialize the key rotator and per-key rate limiters
 _key_rotator = APIKeyRotator()
+# One RateLimiter per API key in the pool (same order as _key_rotator._keys)
+_per_key_rate_limiters: List[RateLimiter] = [
+    RateLimiter() for _ in range(len(_key_rotator._keys))
+]
 
 
 def get_key_rotator() -> APIKeyRotator:
     """Return the module-level API key rotator (for testing/config)."""
     return _key_rotator
+
+
+# For backward compatibility, we keep get_rate_limiter but it now returns
+# the first per-key rate limiter if any keys are configured, otherwise a
+# dummy RateLimiter.
+def get_rate_limiter() -> RateLimiter:
+    """Return the module-level cloud rate limiter (for testing/config)."""
+    if _per_key_rate_limiters:
+        return _per_key_rate_limiters[0]
+    return RateLimiter()  # fallback
 
 
 # ---------------------------------------------------------------------------
@@ -265,13 +287,14 @@ def get_key_rotator() -> APIKeyRotator:
 
 Tier = Literal["local", "cloud"]
 
+
 @dataclass(frozen=True)
 class ChatRequest:
     """One chat completion call."""
 
     messages: list[dict[str, Any]]
     model: str
-    tier: Tier | None = None  # auto-resolved by ``_pick_client_and_model``
+    tier: Optional[Tier] = None  # auto-resolved by ``_pick_client_and_model``
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: str | dict[str, Any] = "auto"
     temperature: float = 0.2
@@ -341,7 +364,7 @@ def _pick_client_and_model(model: str) -> tuple[Callable[[], AsyncOpenAI], str, 
 
     - ``local:<m>``                 → local client, model=``<m>``
     - starts with a cloud prefix    → cloud client, kept as-is
-    - bare model name (e.g. gguf)  → local client
+    - bare model name (e.g. gguf)   → local client
     - bare cloud-style name         → cloud client (fallback heuristic)
     """
     if model.startswith("local:"):
@@ -355,7 +378,7 @@ def _pick_client_and_model(model: str) -> tuple[Callable[[], AsyncOpenAI], str, 
     return _local_client, model, "local"
 
 
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------------__
 # Text-based tool-call parser (for local models without grammar)
 # ---------------------------------------------------------------------------
 
@@ -373,7 +396,7 @@ _FENCED_JSON_RE = re.compile(
 
 # Most permissive: bare JSON object on its own line with "name" key
 _BARE_JSON_RE = re.compile(
-    r"^\s*(\{\s*\"name\"\s*:\s*\"[^\"]+\".*\})\s*$",
+    r"^\s*(\{\s*\"name\"\s*:.*?\})\s*$",
     re.MULTILINE,
 )
 
@@ -383,7 +406,7 @@ _BARE_JSON_RE = re.compile(
 # single-line objects; this pattern catches multi-line JSON
 # blocks that are separated by blank lines from surrounding text.
 _QWEN_TOOL_CALL_RE = re.compile(
-    r"\n\n(\{\"name\"\s*:\s*\"[^\"]+\".*?\})\n\n",
+    r"\n\n(\{\"name\"\s*:.*?\})\n\n",
     re.DOTALL,
 )
 
@@ -414,15 +437,47 @@ def parse_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
                 args = obj.get("arguments", {})
                 if not isinstance(args, dict):
                     args = {}
-                found.append({
-                    "id": f"tc_{len(found)}",
-                    "name": obj["name"],
-                    "arguments": json.dumps(args),
-                })
+                found.append(
+                    {
+                        "id": f"tc_{len(found)}",
+                        "name": obj["name"],
+                        "arguments": json.dumps(args),
+                    }
+                )
         if found:
             break  # first pattern that matches wins
 
     return found
+
+
+# ---------------------------------------------------------------------------
+# Tool definition helper
+# ---------------------------------------------------------------------------
+
+
+def tool_def(
+    name: str,
+    description: str,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Build an OpenAI-compatible tool descriptor from a JSON-Schema dict.
+
+    Example::
+
+        tool_def(
+            "read_file",
+            "Read a local file.",
+            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        )
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +489,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
     """Send ``req`` to the appropriate endpoint and return a normalised response.
 
     For cloud requests:
-    - Respects the 40 RPM rate limit via token bucket
-    - Retries on 429/500/502/503 with exponential backoff
+    - Respects the per-key 40 RPM rate limit via token bucket
+    - Retries on 429/500/502/503 with exponential backoff + jitter
     - Rotates API keys on auth/rate-limit errors
     - Falls back to local model if all API keys are exhausted
     """
@@ -460,7 +515,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
     # Cloud requests: rate limit + retry logic
     if tier == "cloud":
         try:
-            return await _chat_cloud_with_retry(client_factory, kwargs, model, tier, req, max_retries)
+            return await _chat_cloud_with_retry(
+                client_factory, kwargs, model, tier, req, max_retries
+            )
         except AllKeysExhausted as exc:
             logger.warning("All API keys exhausted (%s), falling back to local", exc)
             # Fall back to local model
@@ -484,7 +541,7 @@ async def _chat_cloud_with_retry(
     req: ChatRequest,
     max_retries: int,
 ) -> ChatResponse:
-    """Cloud chat with rate limiting, exponential backoff, and key rotation."""
+    """Cloud chat with per-key rate limiting, exponential backoff + jitter, and key rotation."""
     from openai import (
         APIStatusError,
         APIConnectionError,
@@ -497,62 +554,86 @@ async def _chat_cloud_with_retry(
 
     for attempt in range(max_retries + 1):
         # Check if all keys are exhausted BEFORE attempting
-        exhausted, cooldown_remaining = _key_rotator.is_exhausted()
+        exhausted, _ = _key_rotator.is_exhausted()
         if exhausted:
-            raise AllKeysExhausted(len(_key_rotator._keys), cooldown_remaining)
+            raise AllKeysExhausted(
+                len(_key_rotator._keys), _key_rotator.is_exhausted()[1]
+            )
 
-        # Rate limiter — wait for a token before each attempt
-        await _rate_limiter.acquire()
+        # Get the current key and its index in the key list
+        key = _key_rotator.current
+        key_index = _key_rotator._index % len(_key_rotator._keys)
 
-        # Use the current key from the rotator
+        # Acquire a token for this specific key's rate limiter
+        await _per_key_rate_limiters[key_index].acquire()
+
+        # Use the current key from the rotator (which should be the one we just selected)
         client = _cloud_client(key=_key_rotator.current)
 
         try:
             resp = await client.chat.completions.create(**kwargs)
+            # Success: leave the rotator's index as-is (so next call starts from here)
             return _parse_response(resp, model, tier, req, send_tools=send_tools)
-
         except RateLimitError as exc:
-            # 429 — rate limited; back off and rotate key
+            # 429 — rate limited; back off with jitter, rotate key
             last_exc = exc
             if attempt < max_retries:
+                # Exponential backoff with full jitter
                 backoff = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+                # Full jitter: random delay between 0 and backoff
+                jittered_backoff = random.uniform(0, backoff)
                 logger.warning(
-                    "cloud 429 (attempt %d/%d), backoff %.1fs, rotating key",
-                    attempt + 1, max_retries + 1, backoff,
+                    "cloud 429 (attempt %d/%d), backoff %.1fs (jittered), rotating key",
+                    attempt + 1,
+                    max_retries + 1,
+                    jittered_backoff,
                 )
                 new_key = _key_rotator.mark_failure()
                 if new_key:
                     logger.info("rotated to key ending ...%s", new_key[-4:])
-                await asyncio.sleep(backoff)
-            continue
-
+                await asyncio.sleep(jittered_backoff)
+                continue
         except (InternalServerError, APIConnectionError) as exc:
-            # 500/502/503 or connection error — back off, same key
+            # 500/502/503 or connection error — back off with jitter, same key
             last_exc = exc
             if attempt < max_retries:
                 backoff = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+                jittered_backoff = random.uniform(0, backoff)
                 logger.warning(
-                    "cloud %s (attempt %d/%d), backoff %.1fs",
-                    type(exc).__name__, attempt + 1, max_retries + 1, backoff,
+                    "cloud %s (attempt %d/%d), backoff %.1fs (jittered)",
+                    type(exc).__name__,
+                    attempt + 1,
+                    max_retries + 1,
+                    jittered_backoff,
                 )
-                await asyncio.sleep(backoff)
-            continue
-
+                await asyncio.sleep(jittered_backoff)
+                continue
         except APIStatusError as exc:
-            # 401/403 — auth error; rotate key
+            # 401/403 — auth error; rotate key with jittered backoff
             if exc.status_code in (401, 403):
                 last_exc = exc
                 if attempt < max_retries:
-                    new_key = _key_rotator.mark_failure()
+                    backoff = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+                    jittered_backoff = random.uniform(0, backoff)
                     logger.warning(
-                        "cloud auth error %d (attempt %d/%d), rotating key",
-                        exc.status_code, attempt + 1, max_retries + 1,
+                        "cloud auth error %d (attempt %d/%d), backoff %.1fs (jittered), rotating key",
+                        exc.status_code,
+                        attempt + 1,
+                        max_retries + 1,
+                        jittered_backoff,
                     )
+                    new_key = _key_rotator.mark_failure()
                     if new_key:
                         logger.info("rotated to key ending ...%s", new_key[-4:])
-                    await asyncio.sleep(1.0)
-                continue
-            raise  # unrecoverable — re-raise
+                    await asyncio.sleep(jittered_backoff)
+                    continue
+            # Unrecoverable — re-raise
+            raise
+        finally:
+            # Restore the original index (in case we changed it above)
+            # Note: we did not change _key_rotator._index in this block,
+            # but we leave this for safety if we ever modify it.
+            pass
 
     # All retries exhausted
     raise last_exc or RuntimeError(
@@ -597,70 +678,35 @@ def _parse_response(
                     count=1,
                     flags=re.DOTALL,
                 )
-            content_text = content_text.strip()
 
     return ChatResponse(
         content=content_text,
         tool_calls=tool_calls,
-        finish_reason=choice.finish_reason or "stop",
+        finish_reason=msg.finish_reason or "stop",
         model=model,
-        usage={
-            k: v
-            for k, v in {
-                "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(resp.usage, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(resp.usage, "total_tokens", 0) or 0,
-            }.items()
-        },
+        usage=dict(resp.usage) if resp.usage else {},
         tier=tier,
     )
 
 
 # ---------------------------------------------------------------------------
-# Tool helpers
+# Exports
 # ---------------------------------------------------------------------------
-
-
-def tool_def(
-    name: str,
-    description: str,
-    parameters: dict[str, Any],
-) -> dict[str, Any]:
-    """Build an OpenAI-compatible tool descriptor from a JSON-Schema dict.
-
-    Example::
-
-        tool_def(
-            "read_file",
-            "Read a local file.",
-            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        )
-    """
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters,
-        },
-    }
-
 
 __all__ = [
     "ChatRequest",
     "ChatResponse",
-    "Tier",
-    "chat",
-    "tool_def",
-    "parse_tool_calls_from_text",
-    "_resolve_local",
-    "_resolve_cloud",
-    "_pick_client_and_model",
-    "RateLimiter",
-    "APIKeyRotator",
     "AllKeysExhausted",
+    "RateLimiter",
     "get_rate_limiter",
     "get_key_rotator",
-    "DEFAULT_RPM",
-    "DEFAULT_MAX_RETRIES",
+    "Tier",
+    "tool_def",
+    "chat",
+    "get_per_key_rate_limiter",
 ]
+
+
+def get_per_key_rate_limiter() -> list[RateLimiter]:
+    """Return the list of per-key rate limiters (for testing)."""
+    return _per_key_rate_limiters

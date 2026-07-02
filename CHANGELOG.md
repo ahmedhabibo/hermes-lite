@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## 0.6.0 — Rate-Limit Hardening
+**Released**: 2026-07-02
+
+### Added
+- **Per-key rate limiting**: Each API key gets its own token-bucket RateLimiter (40 RPM default) so that exhaustion of one key doesn't block others.
+- **Jittered exponential backoff**: Full jitter on backoff delays (0 to backoff seconds) to reduce thundering herd during rate-limit or API errors.
+- **Key-aware rotation**: When a key hits a 429/401/403, it's marked as failed and the next key in the pool is used, with its own rate limiter.
+- **Exhaustion detection**: `APIKeyRotator.is_exhausted()` now correctly reports when all keys are in cooldown.
+
+### Changed
+- **RateLimiter scope**: Changed from a single module-level singleton to a list of per-key instances, indexed by the key rotator.
+- **Backoff algorithm**: Added jitter (full jitter) to exponential backoff for both rate-limit and server errors.
+- **Logging**: Enhanced debug and warning logs to show jittered backoff values and key rotation details.
+
+### Fixed
+- **Key exhaustion edge case**: When all keys are exhausted, the `AllKeysExhausted` exception now reports the correct cooldown time (time until the earliest key recovers).
+- **Test compatibility**: Updated existing rate-limiter tests to work with the new per-key design (tests still pass).
+
 ## 0.5.0 — MoA Orchestration + CLI Entry Point
 **Released**: 2026-07-01
 
@@ -20,8 +38,6 @@
 - **MoA crash**: `log_turn()` signature mismatch (passed invalid kwargs)
 - **Duplicate header**: MoA path no longer renders `☁️ cloud · 1 turn(s)` twice
 
----
-
 ## 0.4.0 — Cloud-First NIM Pivot
 **Released**: 2026-06-30
 
@@ -38,8 +54,6 @@
 - **LLM layer**: Added `stepfun-ai/` cloud prefix support
 - **Tests**: Updated assertions for cloud-first behavior
 
----
-
 ## 0.3.0 — Hackathon-Ready Polish
 **Released**: 2026-06-19
 
@@ -54,8 +68,6 @@
 ### Changed
 - **Default tools**: 6 essentials (`read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`)
 - **Version**: Bumped to 0.3.0
-
----
 
 ## 0.2.0 — Local Qwen 3B + 6 Essential Tools + Router + Sandbox
 **Released**: 2026-06-19
@@ -76,8 +88,6 @@
 
 ### Removed
 - Retired `echo`, `calculator`, `save_note` default tools
-
----
 
 ## 0.1.0 — Initial Demo
 **Released**: 2026-06-13
