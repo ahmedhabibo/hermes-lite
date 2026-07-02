@@ -31,7 +31,7 @@ _CONTROL_TOKEN_PATTERNS = [
     r"<\|assistant\|>.*?</\|assistant\|>",
     r"<\|endoftext\|>",
     r"<\|end\|>",
-    r"<\|im_start\|>.*?<\|im_end\|>",
+    r"<\|im_start\|>.*?</\|im_end\|>",
     r"<\|startoftext\|>",
     r"<\|end_of_turn\|>",
     r"<\|reserved_\d+\|>",
@@ -39,6 +39,14 @@ _CONTROL_TOKEN_PATTERNS = [
     r"<<SYS>>.*?<</SYS>>",
     r"<\|begin_of_text\|>",
     r"<\|end_of_text\|>",
+    # Bare tokens (without closing tags) — catch standalone injections
+    r"<\|system\|>",
+    r"<\|user\|>",
+    r"<\|assistant\|>",
+    r"<\|im_start\|>",
+    r"<\|im_end\|>",
+    r"<s>",
+    r"</s>",
 ]
 
 # Compile the combined regex once.

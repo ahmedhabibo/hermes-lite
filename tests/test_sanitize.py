@@ -278,7 +278,7 @@ class TestMoASanitization:
         assert "[REDACTED]" in result
 
     def test_sanitize_moa_aggregator_prompt(self):
-        text = "Aggregate: <|im_start|>ref<|im_end|>"
+        text = "Aggregate: <|im_start|>ref</|im_end|>"
         result = sanitize_moa_aggregator_prompt(text)
         assert "[REDACTED]" in result
         assert "ref" not in result
@@ -287,6 +287,45 @@ class TestMoASanitization:
         assert sanitize_moa_reference("") == ""
         assert sanitize_moa_reference(None) == None
         assert sanitize_moa_aggregator_prompt("") == ""
+
+
+class TestUserPromptSanitization:
+    """Tests for user prompt scrubbing in the orchestrator."""
+
+    def test_scrub_user_prompt_control_tokens(self):
+        """Control tokens in user prompts are scrubbed before LLM dispatch."""
+        from hermes_lite.sanitize import scrub_control_tokens
+        prompt = "Hello <|im_start|>secret</|im_end|> world"
+        result = scrub_control_tokens(prompt)
+        assert "[REDACTED]" in result
+        assert "secret" not in result
+
+    def test_scrub_user_prompt_normal_text_unchanged(self):
+        """Normal user prompts pass through unchanged."""
+        from hermes_lite.sanitize import scrub_control_tokens
+        prompt = "What is the capital of France?"
+        assert scrub_control_tokens(prompt) == prompt
+
+    @pytest.mark.asyncio
+    async def test_build_llm_history_scrubs_user_prompt(self):
+        """_build_llm_history must scrub control tokens from the current prompt."""
+        import tempfile
+        from pathlib import Path
+        from hermes_lite.orchestrator import HermesOrchestrator
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orch = HermesOrchestrator(db_path=str(Path(tmpdir) / "test.db"))
+            try:
+                msgs = await orch._build_llm_history(
+                    "Normal question <|im_start|>injected</|im_end|> end"
+                )
+                user_msgs = [m for m in msgs if m["role"] == "user"]
+                last_user = user_msgs[-1]["content"]
+                assert "[REDACTED]" in last_user
+                assert "injected" not in last_user
+            finally:
+                if orch.pool is not None:
+                    await orch.pool.close()
 
 
 if __name__ == "__main__":

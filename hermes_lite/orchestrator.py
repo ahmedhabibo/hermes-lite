@@ -66,7 +66,7 @@ try:
 except Exception:
     __version__ = "0.5.0"
 
-from hermes_lite.sanitize import sanitize_tool_args
+from hermes_lite.sanitize import sanitize_tool_args, scrub_control_tokens
 
 # ---------------------------------------------------------------------------
 # Built-in tools are now provided by :mod:`hermes_lite.tools_builtins`.
@@ -1067,7 +1067,9 @@ class HermesOrchestrator:
         # Append the current user prompt (it may already be in history
         # from the _save_message call, but we guarantee it's the last
         # message by adding it explicitly).
-        msgs.append({"role": "user", "content": current_prompt})
+        # Scrub control tokens from user input to prevent prompt injection
+        safe_prompt = scrub_control_tokens(current_prompt)
+        msgs.append({"role": "user", "content": safe_prompt})
         return msgs
 
     def start(self) -> None:

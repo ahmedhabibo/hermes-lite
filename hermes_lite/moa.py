@@ -508,11 +508,12 @@ class MoAEngine:
                 agg_messages.append(msg)
 
         # Add the reference outputs as a "system" context message
+        safe_prompt = sanitize_moa_aggregator_prompt(original_prompt)
         aggregator_content = (
             f"Here are the reference model responses:\n\n"
             f"{ref_block}\n\n"
             f"---\n\n"
-            f"Now synthesise a comprehensive response to my original question: {original_prompt}"
+            f"Now synthesise a comprehensive response to my original question: {safe_prompt}"
         )
         safe_aggregator_content = sanitize_moa_aggregator_prompt(aggregator_content)
         agg_messages.append({
