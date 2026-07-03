@@ -18,7 +18,6 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from hermes_lite.orchestrator import HermesOrchestrator
-from hermes_lite.llm import chat, ChatRequest, chat_stream
 from hermes_lite.router import LiteRouter
 
 app = FastAPI(title="Hermes-Lite WebUI", version="0.6.0")
@@ -97,21 +96,15 @@ async def ws_chat(ws: WebSocket):
 
                 await ws.send_text(json.dumps({"type": "stream_start"}))
 
-                # Determine model: local-first, unless /cloud override is active
-                if getattr(orch, "_force_tier", None) == "cloud":
-                    stream_model = os.environ.get("HERMES_LITE_CLOUD_MODEL", "z-ai/glm-5.2")
-                else:
-                    stream_model = "local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf"
-
-                # Use streaming chat
-                req = ChatRequest(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=stream_model,
-                    max_tokens=1024,
-                )
+                # Route through orchestrator (handles tools, memory, commands)
                 try:
-                    async for delta in chat_stream(req):
-                        await ws.send_text(json.dumps({"type": "stream_delta", "content": delta}))
+                    response = await orch._handle_prompt(prompt)
+                    # Simulate streaming by sending in chunks
+                    chunk_size = 80
+                    for i in range(0, len(response), chunk_size):
+                        chunk = response[i:i + chunk_size]
+                        await ws.send_text(json.dumps({"type": "stream_delta", "content": chunk}))
+                        await asyncio.sleep(0.01)  # small delay for visual effect
                     await ws.send_text(json.dumps({"type": "stream_end"}))
                 except Exception as e:
                     await ws.send_text(json.dumps({"type": "error", "content": f"Stream error: {e}"}))

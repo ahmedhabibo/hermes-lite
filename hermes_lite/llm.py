@@ -794,7 +794,7 @@ async def chat_stream(req: ChatRequest) -> Any:
     if tier == "cloud":
         max_retries = int(os.environ.get("HERMES_LITE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
         try:
-            async for text in await _chat_cloud_stream_with_retry(
+            async for text in _chat_cloud_stream_with_retry(
                 client_factory, kwargs, model, tier, req, max_retries
             ):
                 yield text
