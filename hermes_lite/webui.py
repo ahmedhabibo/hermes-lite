@@ -305,7 +305,10 @@ function sendMsg() {
     inputEl.value = '';
     sendBtn.disabled = true;
 
-    if (streamMode.checked) {
+    // Slash commands always go through the chat path (not streaming)
+    // so the orchestrator can handle /cloud, /local, /model, /help, etc.
+    const isCommand = text.startsWith('/') || text.startsWith('!');
+    if (streamMode.checked && !isCommand) {
         ws.send(JSON.stringify({type: 'stream', message: text}));
     } else {
         ws.send(JSON.stringify({type: 'chat', message: text}));
