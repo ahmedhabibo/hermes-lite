@@ -65,6 +65,11 @@ def _main() -> None:
         except ValueError:
             pass
 
+    if len(sys.argv) > 1 and sys.argv[1] == "webui":
+        from hermes_lite.webui import main
+        main()
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "stats":
         from hermes_lite.observability import print_stats
         print_stats()
