@@ -44,7 +44,7 @@
   - Simple heuristics: keyword detection, length, entity count
   - Threshold: `local_max_complexity` (default 0.3)
   - Consecutive local failures → escalate threshold (linear backoff)
-  - **Cloud-first fallback chain**: `minimaxai/minimax-m3 → moonshotai/kimi-k2.6 → qwen/qwen3.5-397b-a17b → deepseek-ai/deepseek-v4-flash`
+  - **Cloud-first fallback chain**: `z-ai/glm-5.2 → minimaxai/minimax-m3 → moonshotai/kimi-k2.6 → qwen/qwen3.5-397b-a17b → deepseek-ai/deepseek-v4-flash`
 - **Output**: `RoutingDecision { tier, model_id, reasoning }`
 
 ### 2. LLM Layer (`hermes_lite/llm.py`)
@@ -110,12 +110,13 @@
 - **Allowed**: file read/write within workspace, network (configurable)
 - **Timeout**: enforced via subprocess + thread monitor
 - **Exit handling**: process cleanup on timeout/kill
+- **Security**: command allowlist/blocklist, secret environment scrubbing, audit log redaction (5 layers total)
 
 ### 8. Subagent (`hermes_lite/subagent.py`)
 - **Tool**: `delegate_task` via Hermes MCP
 - **Parameters**: `goal`, `context`, `toolsets`, `role`
 - **Limits**: max 4 concurrent, max 2 nested levels
-- **Isolation**: per-child session + terminal
+- **Isolation**: per-child session + terminal + env sanitization isolation
 
 ### 9. Observability (`hermes_lite/observability.py`)
 - **Log**: JSONL to `~/.hermes_lite/logs/turns.jsonl`
@@ -212,7 +213,7 @@ hermes_lite/
 ├── subagent.py          # delegate_task tool
 ├── tools_builtins.py    # 6 essential tools
 └── tests/
-    ├── test_*.py        # 463 tests
+    ├── test_*.py        # 467 tests
 ```
 
 ## MoA Deep Dive

@@ -37,7 +37,9 @@ tests/test_rate_limiter.py
 tests/test_registry.py
 tests/test_router.py
 tests/test_sandbox.py
+tests/test_sandbox_security.py
 tests/test_sanitize.py
+tests/test_streaming.py
 tests/test_subagent.py
 tests/test_tool_loop.py
 tests/test_tools_essentials.py

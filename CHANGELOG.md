@@ -1,33 +1,36 @@
 # CHANGELOG
 
-## 0.6.0 — Rate-Limit Hardening + GLM-5.2 Model Support
-**Released**: 2026-07-02
+## 0.6.0 — Security Hardening + Streaming + Docker + CI
+**Released**: 2026-07-03
 
-### Added
-- **Per-key rate limiting**: Each API key gets its own token-bucket RateLimiter (40 RPM default) so that exhaustion of one key doesn't block others.
-- **Jittered exponential backoff**: Full jitter on backoff delays (0 to backoff seconds) to reduce thundering herd during rate-limit or API errors.
-- **Key-aware rotation**: When a key hits a 429/401/403, it's marked as failed and the next key in the pool is used, with its own rate limiter.
-- **Exhaustion detection**: `APIKeyRotator.is_exhausted()` now correctly reports when all keys are in cooldown.
-- **GLM-5.2 model support**: `z-ai/glm-5.2` added as the primary default cloud model, replacing `minimaxai/minimax-m3`.
-- **Cloud prefix recognition**: Added `z-ai/` to `_CLOUD_PREFIXES` so GLM-5.2 routes to the cloud endpoint correctly.
+### Added — Security (Phase 1, Items 1-7)
+- **#1 API Key Exhaustion**: `AllKeysExhausted` exception with `is_exhausted()` cooldown math, cloud→local fallback when all keys exhausted
+- **#2 Auth/Authorization**: `ToolAuthError`, `dangerous` flag on tools, `--auth-token` CLI, built-in tools flagged
+- **#3 Input Sanitization**: `sanitize.py` — control-token scrubbing, path-traversal blocking, shell-injection heuristics, MoA sanitization
+- **#4 Rate-limit Hardening**: Per-key token buckets, full-jitter exponential backoff, `z-ai/glm-5.2` default, 5-model fallback chain
+- **#5 Sandbox Tightening**: Command allowlist (`HERMES_LITE_SANDBOX_ALLOWLIST`), blocklist, `CommandBlockedError`, `_check_command_allowed()` enforced in `run_sandboxed`
+- **#6 Secret Redaction**: `_sanitize_env()` strips secrets from child env, `_redact_in_text()` redacts secrets from stdout/stderr/audit log
+- **#7 Subagent Isolation**: Child `os.environ` sanitized (secrets stripped), parent env restored after subagent run
+
+### Added — Features
+- **Streaming**: `chat_stream()` async generator — token-by-token streaming for both cloud and local endpoints
+- **Docker**: Dockerfile (Python 3.11-slim), docker-compose.yml (interactive + test services)
+- **CI**: GitHub Actions workflow — Python 3.9/3.11/3.12 matrix, pytest + coverage + ruff lint, concurrency cancel
+- **.env loading**: `python-dotenv` auto-load on package import for multi-key rotation
+- **PyPI metadata**: Authors, classifiers, keywords, project URLs added to `pyproject.toml`
 
 ### Changed
-- **Default cloud model**: Changed from `minimaxai/minimax-m3` to `z-ai/glm-5.2` (CLOUD_MODEL_DEFAULT, DEFAULT_FALLBACK_CHAIN).
-- **Fallback chain**: Now 5 models: `z-ai/glm-5.2 → minimaxai/minimax-m3 → moonshotai/kimi-k2.6 → qwen/qwen3.5-397b-a17b → deepseek-ai/deepseek-v4-flash`.
-- **MoA presets**: All 5 presets (council, speed, verification, creative, coding) updated to use `z-ai/glm-5.2` as primary reference and aggregator where applicable.
-- **RateLimiter scope**: Changed from a single module-level singleton to a list of per-key instances, indexed by the key rotator.
-- **Backoff algorithm**: Added jitter (full jitter) to exponential backoff for both rate-limit and server errors.
-- **Logging**: Enhanced debug and warning logs to show jittered backoff values and key rotation details.
-- **Version fallbacks**: Updated hardcoded `0.5.0` fallbacks to `0.6.0` in `orchestrator.py` and `__main__.py`.
+- **Default cloud model**: `z-ai/glm-5.2` (was `minimaxai/minimax-m3`)
+- **Default local model**: `Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf` (Bartowski quant, 3.1GB — was `gemma-4-E2B-it-abliterated-Q4_K_M.gguf`)
+- **Fallback chain**: 5 models — `z-ai/glm-5.2 → minimaxai/minimax-m3 → moonshotai/kimi-k2.6 → qwen/qwen3.5-397b-a17b → deepseek-ai/deepseek-v4-flash`
+- **launchd plist**: Updated to `ngl=28`, `ctx=65536`, Q8_0 KV cache for 8GB M1 safety
 
-### Fixed
-- **`finish_reason` AttributeError**: `ChatCompletionMessage` has no `finish_reason` — now correctly accessed via `choice.finish_reason` instead of `msg.finish_reason`.
-- **`web_search`/`web_fetch` crash in standalone mode**: When `hermes_tools` is not importable, handlers now return `_ok()` with an informative message instead of `_err()`, preventing the orchestrator's `repeated_error` loop from triggering.
-- **Key exhaustion edge case**: When all keys are exhausted, the `AllKeysExhausted` exception now reports the correct cooldown time (time until the earliest key recovers).
-- **Test compatibility**: Updated existing rate-limiter tests to work with the new per-key design (tests still pass).
+### Tests
+- **432 → 467** (+30 sandbox security, +1 subagent env isolation, +4 streaming)
+- New files: `test_sandbox_security.py`, `test_streaming.py`, `conftest.py`
+- 20 test files, 16 source modules
 
 ## 0.5.0 — MoA Orchestration + CLI Entry Point
-**Released**: 2026-07-01
 
 ### Added
 - **Mixture-of-Agents (MoA) engine** (`hermes_lite/moa.py`): Run 3-5 diverse LLMs in parallel, then aggregate with a synthesis model
@@ -45,7 +48,6 @@
 ### Fixed
 - **MoA crash**: `log_turn()` signature mismatch (passed invalid kwargs)
 - **Duplicate header**: MoA path no longer renders `☁️ cloud · 1 turn(s)` twice
-
 ## 0.4.0 — Cloud-First NIM Pivot
 **Released**: 2026-06-30
 
@@ -61,7 +63,6 @@
 - **Router**: `DEFAULT_FALLBACK_CHAIN` now cloud-first; tier selection derives from chain head
 - **LLM layer**: Added `stepfun-ai/` cloud prefix support
 - **Tests**: Updated assertions for cloud-first behavior
-
 ## 0.3.0 — Hackathon-Ready Polish
 **Released**: 2026-06-19
 
@@ -76,7 +77,6 @@
 ### Changed
 - **Default tools**: 6 essentials (`read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`)
 - **Version**: Bumped to 0.3.0
-
 ## 0.2.0 — Local Qwen 3B + 6 Essential Tools + Router + Sandbox
 **Released**: 2026-06-19
 
@@ -96,7 +96,6 @@
 
 ### Removed
 - Retired `echo`, `calculator`, `save_note` default tools
-
 ## 0.1.0 — Initial Demo
 **Released**: 2026-06-13
 

@@ -1,7 +1,7 @@
 {
-  "find_odoo_modules": 21.00275000000007,
-  "memory_persistence": 23.059958000001046,
-  "read_and_summarize": 1.7620000000000413,
-  "route_to_cloud": 0.8309160000017357,
-  "terminal_with_sandbox": 30025.747624999996
+  "find_odoo_modules": 18.788334000000127,
+  "memory_persistence": 15.9529169999999,
+  "read_and_summarize": 1.6137089999999077,
+  "route_to_cloud": 1.2555000000027405,
+  "terminal_with_sandbox": 30016.547
 }

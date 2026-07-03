@@ -1,6 +1,6 @@
 # Hermes-Lite ⚡
 
-[![Tests](https://img.shields.io/badge/tests-463%20passing-brightgreen)](./tests)
+[![Tests](https://img.shields.io/badge/tests-467%20passing-brightgreen)](./tests)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 [![Cloud: NVIDIA NIM](https://img.shields.io/badge/cloud-NVIDIA%20NIM-76B900)](https://build.nvidia.com/)
@@ -234,7 +234,7 @@ pip install -e ".[test]"
 python -m pytest tests/ -v
 ```
 
-Tests cover: registry (48), memory (47), orchestrator (31), tool loop (15), tools-essentials (55), LLM (5), router (37), sandbox (30+30new), sub-agent (18+1new), memory bridge (10), observability (6), e2e smoke (5), moa 15, api_key_exhaustion 5, sanitize ~20, cli_commands ~10, conftest 1.
+Tests cover: registry (48), memory (47), orchestrator (31), tool loop (15), tools-essentials (55), LLM (5), router (37), sandbox (60), sub-agent (19), memory bridge (10), observability (6), e2e smoke (5), moa 15, api_key_exhaustion 5, sanitize ~20, cli_commands ~10, streaming 4, conftest 1. **467 total.**
 
 ---
 
@@ -252,11 +252,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) — PRs welcome, TDD preferred.
 
 ## CHANGELOG
 
-### 0.6.0 — Security Hardening Phase 1 (Items 1-7)
+### 0.6.0 — Security Hardening + Streaming + Docker
 2026-07-03
-- **Added:** API key exhaustion handling, Auth/Authorization framework, Input sanitization pipeline, Rate-limit hardening with jitter, Sandbox tightening (command allowlist/blocklist, secret scrubbing, audit log redaction), Secret redaction in logs, Subagent isolation (env sanitization)
-- **Changed:** Default model to z-ai/glm-5.2, local model to Qwen2.5-Coder-7B-Instruct-IQ3_XS (3.1GB)
-- **Tests:** 432 → 463
+- **Security (Phase 1, 7 items):** API key exhaustion handling, Auth/Authorization framework, Input sanitization pipeline, Rate-limit hardening with jitter, Sandbox tightening (command allowlist/blocklist, secret scrubbing, audit log redaction), Secret redaction in logs, Subagent isolation (env sanitization)
+- **Streaming:** `chat_stream()` async generator — token-by-token streaming for both cloud and local endpoints
+- **Docker:** Dockerfile + docker-compose.yml for containerized deployment
+- **Changed:** Default model to z-ai/glm-5.2, local model to Qwen2.5-Coder-7B-Instruct-IQ3_XS (3.1GB, Bartowski quant)
+- **CI:** GitHub Actions — Python 3.9/3.11/3.12 matrix, pytest + coverage + ruff lint
+- **Tests:** 432 → 467
 
 ### 0.5.0 — Toolchain Expansion + Observability
 2026-06-15
