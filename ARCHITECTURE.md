@@ -187,7 +187,7 @@ Environment variables (or edit defaults in `router.py`, `llm.py`, `moa.py`):
 | `HERMES_LITE_MOA_AGG_TEMPERATURE` | `0.2` | Default aggregator temperature |
 | `HERMES_LITE_MOA_MAX_TOKENS` | `4096` | Per-call token budget |
 | `LITE_LOCAL_MAX_COMPLEXITY` | `0.3` | Max complexity for local routing |
-| `LITE_LOCAL_MODEL` | `local:qwen2.5-7b-instruct-q4_k_m` | Local model ID |
+| `LITE_LOCAL_MODEL` | `local:Qwen2.5-Coder-7B-Instruct-IQ3_XS` | Local model ID |
 | `LITE_LLM_BASE_URL` | `http://localhost:8080/v1` | Local LLM server endpoint |
 | `LITE_MEMORY_MAX_CHARS` | `800` | Max memory chars in prompt |
 | `HERMES_MCP_CONFIG` | `~/.hermes/config.yaml` | MCP server config path |

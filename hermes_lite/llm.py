@@ -22,7 +22,7 @@ includes a token-bucket rate limiter that throttles automatically:
 Configuration via env vars:
 
 - ``HERMES_LITE_LOCAL_URL``       (default ``http://127.0.0.1:8080/v1``)
-- ``HERMES_LITE_LOCAL_MODEL``     (default ``gemma-4-E2B-it-abliterated-Q4_K_M.gguf``)
+- ``HERMES_LITE_LOCAL_MODEL``     (default ``Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf``)
 - ``HERMES_LITE_CLOUD_URL``       (default ``https://integrate.api.nvidia.com/v1``)
 - ``HERMES_LITE_CLOUD_MODEL``     (default ``z-ai/glm-5.2``)
 - ``HERMES_LITE_NVIDIA_API_KEY``  (single key, or first key in pool)
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 LOCAL_URL_DEFAULT = "http://127.0.0.1:8080/v1"
-LOCAL_MODEL_DEFAULT = "gemma-4-E2B-it-abliterated-Q4_K_M.gguf"
+LOCAL_MODEL_DEFAULT = "Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf"
 
 CLOUD_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 CLOUD_MODEL_DEFAULT = "z-ai/glm-5.2"

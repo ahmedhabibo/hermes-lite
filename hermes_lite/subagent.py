@@ -159,7 +159,7 @@ def _default_subagent_model_id() -> str:
     override via ``HERMES_LITE_SUBAGENT_MODEL``. Anything non-empty goes —
     the LLM client resolves it via ``_pick_client_and_model``.
 
-    For offline use, set the env to ``local:qwen2.5-7b-instruct-q4_k_m.gguf``.
+    For offline use, set the env to ``local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf``.
     """
     return os.environ.get(
         "HERMES_LITE_SUBAGENT_MODEL",
