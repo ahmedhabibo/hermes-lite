@@ -711,7 +711,140 @@ __all__ = [
     "Tier",
     "tool_def",
     "chat",
+    "chat_stream",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Streaming support
+# ---------------------------------------------------------------------------
+
+async def chat_stream(req: ChatRequest) -> Any:
+    """Stream LLM response token-by-token.
+
+    Returns an async generator that yields chunks (deltas) as they arrive.
+    Works with both cloud (NIM) and local (llama-server) endpoints.
+
+    Usage::
+
+        async for chunk in chat_stream(req):
+            print(chunk, end="", flush=True)
+
+    For cloud requests, rate limiting and key rotation are applied
+    the same as ``chat()``. If all keys are exhausted, falls back to
+    local automatically.
+
+    Yields
+    ------
+    str
+        Text deltas as they arrive from the LLM.
+    """
+    client_factory, model, tier = _pick_client_and_model(req.model)
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": req.messages,
+        "temperature": req.temperature,
+        "max_tokens": req.max_tokens,
+        "stream": True,
+    }
+    # Don't send tools to local unless explicitly enabled
+    send_tools = bool(req.tools) and (tier != "local" or _LOCAL_TOOLS_ENABLED)
+    if send_tools:
+        kwargs["tools"] = req.tools
+        kwargs["tool_choice"] = req.tool_choice
+    kwargs.update(req.extra)
+
+    if tier == "cloud":
+        max_retries = int(os.environ.get("HERMES_LITE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
+        try:
+            async for text in await _chat_cloud_stream_with_retry(
+                client_factory, kwargs, model, tier, req, max_retries
+            ):
+                yield text
+        except AllKeysExhausted:
+            logger.warning("All API keys exhausted during streaming, falling back to local")
+            local_url, local_model = _resolve_local()
+            local_client = AsyncOpenAI(base_url=local_url, api_key="not-needed", timeout=60.0)
+            kwargs["model"] = local_model
+            kwargs.pop("tools", None)
+            kwargs.pop("tool_choice", None)
+            stream = await local_client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+    else:
+        client = client_factory()
+        stream = await client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+
+async def _chat_cloud_stream_with_retry(
+    client_factory: Callable[[], AsyncOpenAI],
+    kwargs: dict[str, Any],
+    model: str,
+    tier: Tier,
+    req: ChatRequest,
+    max_retries: int,
+) -> Any:
+    """Cloud streaming with per-key rate limiting, backoff, and key rotation."""
+    from openai import (
+        APIStatusError,
+        APIConnectionError,
+        RateLimitError,
+        InternalServerError,
+    )
+
+    rotator = get_key_rotator()
+    last_exc: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        key_idx = rotator.next_key() if rotator else 0
+        per_key_limiters = get_per_key_rate_limiters()
+        limiter = per_key_limiters[key_idx] if key_idx < len(per_key_limiters) else None
+
+        if limiter:
+            await limiter.acquire()
+
+        try:
+            client = client_factory()
+            keys = rotator.get_keys() if rotator else []
+            if keys and key_idx < len(keys):
+                client = AsyncOpenAI(
+                    base_url=kwargs.get("base_url", CLOUD_URL_DEFAULT),
+                    api_key=keys[key_idx],
+                    timeout=60.0,
+                )
+
+            stream = await client.chat.completions.create(**kwargs)
+            collected = ""
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta.content
+                    collected += delta
+                    yield delta
+            return
+
+        except (RateLimitError, InternalServerError) as exc:
+            last_exc = exc
+            if rotator:
+                rotator.mark_failed(key_idx)
+            backoff = min(2 ** attempt, 16)
+            jitter = random.uniform(0, backoff)
+            await asyncio.sleep(jitter)
+        except (APIConnectionError, APIStatusError) as exc:
+            last_exc = exc
+            await asyncio.sleep(min(2 ** attempt, 16))
+        except AllKeysExhausted:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            break
+
+    if last_exc:
+        raise last_exc
 
 
 def get_per_key_rate_limiter() -> list[RateLimiter]:

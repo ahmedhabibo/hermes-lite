@@ -6,7 +6,25 @@ build-backend = "setuptools.build_meta"
 name = "hermes-lite"
 version = "0.6.0"
 description = "Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. MoA orchestration, rate limiting with per-key buckets and jittered backoff, key rotation, cloud fallback chain, local fallback for offline use."
+readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.9"
+authors = [
+    {name = "Ahmed Hassan", email = "a.hassan.b.h@gmail.com"},
+]
+keywords = ["ai", "agent", "llm", "nvidia-nim", "moa", "mixture-of-agents", "llama-cpp", "tool-calling"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.0",
     "aiosqlite>=0.20.0",
@@ -14,6 +32,12 @@ dependencies = [
     "rich>=13.0.0",
     "openai>=1.40.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ahmedhabibo/hermes-lite"
+Repository = "https://github.com/ahmedhabibo/hermes-lite"
+Issues = "https://github.com/ahmedhabibo/hermes-lite/issues"
+Changelog = "https://github.com/ahmedhabibo/hermes-lite/releases"
 
 [project.scripts]
 hermes-lite = "hermes_lite.__main__:_main"

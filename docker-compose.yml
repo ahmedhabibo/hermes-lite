@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  hermes-lite:
+    build: .
+    container_name: hermes-lite
+    environment:
+      - HERMES_LITE_NVIDIA_API_KEY=${HERMES_LITE_NVIDIA_API_KEY:-}
+      - HERMES_LITE_NVIDIA_API_KEYS=${HERMES_LITE_NVIDIA_API_KEYS:-}
+      - HERMES_LITE_CLOUD_MODEL=z-ai/glm-5.2
+      - HERMES_LITE_RPM=40
+    volumes:
+      - ./data:/root/.hermes_lite
+    stdin_open: true
+    tty: true
+    command: python -m hermes_lite
+
+  test:
+    build: .
+    container_name: hermes-lite-test
+    command: python -m pytest tests/ --tb=short -q --cov=hermes_lite --cov-report=term-missing
+    volumes:
+      - ./:/app
