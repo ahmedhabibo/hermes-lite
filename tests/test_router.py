@@ -351,9 +351,12 @@ class TestTierBoundaries:
         assert d.tier == "local", f"score {d.complexity_score} should sit at or below threshold {target}"
 
     def test_score_just_above_threshold_goes_cloud(self, router: LiteRouter):
-        """One token more than the equality case should flip to cloud."""
+        """Score just above the threshold should flip to cloud."""
         target = router.local_max_complexity
-        needed = (target - 0.2) / 0.4
-        tokens = int(needed * router.large_context_tokens) + 1
-        d = router.route("x" * router.large_prompt_chars, tokens, 0)
-        assert d.tier == "cloud"
+        # With local-first v0.7, threshold is 0.7. Need prompt (0.2) + context (0.4) +
+        # history (0.2) to exceed the threshold. Add extra tokens to push above exactly.
+        needed_context = (target - 0.2 - 0.2) / 0.4
+        tokens = int(needed_context * router.large_context_tokens) + 10  # +10 to exceed
+        history_turns = router.large_history_turns  # full history weight
+        d = router.route("x" * router.large_prompt_chars, tokens, history_turns)
+        assert d.tier == "cloud", f"score {d.complexity_score:.4f} should exceed threshold {target}"

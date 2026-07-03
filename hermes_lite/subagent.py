@@ -154,16 +154,16 @@ def _clamp(value: int, lo: int, hi: int) -> int:
 def _default_subagent_model_id() -> str:
     """Return the canonical model id for the subagent.
 
-    **v0.4+:** Cloud-first — defaults to ``deepseek-ai/deepseek-v4-flash``
-    (lightweight NIM model ideal for short subagent tasks). Admins can
-    override via ``HERMES_LITE_SUBAGENT_MODEL``. Anything non-empty goes —
-    the LLM client resolves it via ``_pick_client_and_model``.
-
-    For offline use, set the env to ``local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf``.
+    **v0.7+:** Local-first — defaults to the local Qwen2.5-Coder-7B model
+    via llama-server. Cloud NIM models can be used by setting
+    ``HERMES_LITE_SUBAGENT_MODEL`` to a NIM model ID (e.g.
+    ``deepseek-ai/deepseek-v4-flash`` for lightweight cloud subagent tasks).
+    Anything non-empty goes — the LLM client resolves it via
+    ``_pick_client_and_model``.
     """
     return os.environ.get(
         "HERMES_LITE_SUBAGENT_MODEL",
-        "deepseek-ai/deepseek-v4-flash",
+        "local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf",
     )
 
 

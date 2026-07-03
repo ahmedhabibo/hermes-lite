@@ -590,7 +590,27 @@ class HermesOrchestrator:
         assistant message so users (and downstream tests) can see the
         chosen tier, but no real LLM call is made yet (the LLM wiring
         lives in T4/T6).
+
+        If ``_force_tier`` is set (via ``/cloud`` command), the router
+        is bypassed and a cloud model is always returned.
         """
+        # Check for forced tier override (/cloud command)
+        if getattr(self, "_force_tier", None) == "cloud":
+            cloud_model = "z-ai/glm-5.2"
+            # Find first cloud model in the fallback chain
+            for entry in self.router.fallback_chain:
+                if not entry.startswith("local:") and "/" in entry:
+                    cloud_model = entry
+                    break
+            score = self.router.complexity(prompt, 0, 0)
+            return RoutingDecision(
+                model_id=cloud_model,
+                tier="cloud",
+                complexity_score=score,
+                reason="forced cloud mode (/cloud override)",
+                fell_back=True,
+            )
+
         history = await self._get_history(limit=20)
         history_turns = sum(1 for m in history if m.get("role") in {"user", "assistant"})
         # Coarse context token estimate: ~4 chars/token. Cheap, good
@@ -763,6 +783,23 @@ class HermesOrchestrator:
             except Exception as exc:
                 response = f"**Memory**: Unable to load memory bridge ({exc})"
 
+        elif prompt.lower().strip() == "/cloud":
+            # Force cloud tier for all subsequent requests until /local or /clear
+            self._force_tier: str | None = "cloud"
+            response = (
+                "☁️ **Cloud mode forced** — all requests will use NVIDIA NIM cloud models.\n"
+                "Use `/local` to switch back to local-first routing."
+            )
+
+        elif prompt.lower().strip() == "/local":
+            # Return to local-first routing (the v0.7 default)
+            self._force_tier = None
+            self.router.reset()
+            response = (
+                "🏠 **Local mode restored** — requests will use the local Qwen model by default,\n"
+                "escalating to cloud only for heavy tasks (multi-step, large context, complex reasoning)."
+            )
+
         elif prompt.lower().strip() == "/help":
             response = (
                 "**Hermes-Lite Commands**\n\n"
@@ -775,6 +812,8 @@ class HermesOrchestrator:
                 "  `/stats` — Show last 10 turns summary\n"
                 "  `/clear` — Reset conversation (keeps memory)\n"
                 "  `/memory` — Show what's loaded into context\n"
+                "  `/cloud` — Force cloud NIM for all requests (heavy mode)\n"
+                "  `/local` — Return to local-first routing (default)\n"
                 "  `/moa` — Show MoA status and available presets\n"
                 "  `/moa <preset>` — Activate Mixture-of-Agents with a preset\n"
                 "  `/moa off` — Deactivate MoA (return to normal)\n"
@@ -1008,7 +1047,7 @@ class HermesOrchestrator:
             )
         # For direct-tool and command paths, record a generic success
         # into the router (no real LLM call).
-        _command_set = ("/tools", "/history", "/help", "/model", "/stats", "/memory", "/clear")
+        _command_set = ("/tools", "/history", "/help", "/model", "/stats", "/memory", "/clear", "/cloud", "/local")
         _command_prefixes = ("/moa",)
         _is_command = prompt.lower().strip() in _command_set or any(
             prompt.lower().strip().startswith(p) for p in _command_prefixes

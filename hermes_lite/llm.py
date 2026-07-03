@@ -1,12 +1,13 @@
-"""hermes_lite.llm — OpenAI-compatible LLM client (cloud-first with local fallback).
+"""hermes_lite.llm — OpenAI-compatible LLM client (local-first with cloud escalation).
 
 Supports two endpoints via the same OpenAI Python SDK:
-- Cloud NVIDIA NIM: ``https://integrate.api.nvidia.com/v1`` (default)
-- Local llama.cpp server: ``http://127.0.0.1:8080/v1`` (fallback)
+- Local llama.cpp server: ``http://127.0.0.1:8080/v1`` (default)
+- Cloud NVIDIA NIM: ``https://integrate.api.nvidia.com/v1`` (escalation)
 
-**Cloud-first (v0.4+):** The default model is now a cloud NIM endpoint.
-Local mode is still available for offline/privacy use via the ``local:``
-prefix or when no API key is configured, but new installs default to cloud.
+**Local-first (v0.7+):** The default model is the local Qwen2.5-Coder-7B.
+Cloud NIM is used for heavy tasks (multi-step tool-calling, large context,
+complex reasoning) or when the local model fails. The router handles the
+decision; this module provides the transport.
 
 Rate limiting
 -------------

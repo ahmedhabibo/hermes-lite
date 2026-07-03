@@ -1,9 +1,9 @@
-"""hermes_lite.router — Tier routing controller (cloud-first with local fallback).
+"""hermes_lite.router — Tier routing controller (local-first with cloud escalation).
 
-Decides which LLM tier (``cloud`` or ``local``) to use for a given prompt
-based on a deterministic complexity score. **Cloud-first since v0.4:**
-the default fallback chain starts with NIM cloud models; local is a fallback
-for offline/privacy use.
+Decides which LLM tier (``local`` or ``cloud``) to use for a given prompt
+based on a deterministic complexity score. **Local-first since v0.7:**
+the default fallback chain starts with the local model; cloud NIM models
+are used only when complexity exceeds the threshold or the local model fails.
 
 Complexity score (0.0 - 1.0, clamped) — weighted sum of four signals:
 
@@ -13,13 +13,8 @@ Complexity score (0.0 - 1.0, clamped) — weighted sum of four signals:
   * keyword heuristic (0.2 weight, 0.0-1.0): tokens like ``refactor``,
     ``architect``, ``debug``, ``multi-step`` each contribute up to 0.25.
 
-A configurable threshold (env ``LITE_LOCAL_MAX_COMPLEXITY``, default 0.3)
+A configurable threshold (env ``LITE_LOCAL_MAX_COMPLEXITY``, default 0.7)
 splits local-vs-cloud: <= threshold ⇒ ``local``; above ⇒ ``cloud``.
-
-With a cloud-first chain (the default) the threshold still works the same
-way — *low* complexity stays on the preferred (cloud) model, high complexity
-uses a heavier cloud model from the chain. The ``local`` tier only activates
-when the chain explicitly starts with a ``local:`` entry.
 
 Escalation
 ----------
@@ -31,13 +26,13 @@ counter.
 
 Config via env (overridable at construction):
 
-* ``LITE_LOCAL_MAX_COMPLEXITY``              (default ``0.3``)
+* ``LITE_LOCAL_MAX_COMPLEXITY``              (default ``0.7``)
 * ``LITE_ESCALATE_AFTER_FAILURES``           (default ``2``)
 * ``LITE_LARGE_PROMPT_CHARS``                (default ``2000``)
 * ``LITE_LARGE_CONTEXT_TOKENS``              (default ``4000``)
 * ``LITE_LARGE_HISTORY_TURNS``               (default ``4``)
 * ``LITE_FALLBACK_CHAIN``                    (default
-  ``"minimaxai/minimax-m3,moonshotai/kimi-k2.6,qwen/qwen3.5-397b-a17b,deepseek-ai/deepseek-v4-flash"``)
+  ``"local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf,z-ai/glm-5.2,minimaxai/minimax-m3,moonshotai/kimi-k2.6,qwen/qwen3.5-397b-a17b,deepseek-ai/deepseek-v4-flash"``)
 
 Public API:
 * ``LiteRouter``
@@ -58,7 +53,7 @@ from hermes_lite.llm import Tier
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_LOCAL_MAX_COMPLEXITY = 0.3
+DEFAULT_LOCAL_MAX_COMPLEXITY = 0.7
 DEFAULT_ESCALATE_AFTER_FAILURES = 2
 DEFAULT_LARGE_PROMPT_CHARS = 2_000
 DEFAULT_LARGE_CONTEXT_TOKENS = 4_000
@@ -98,13 +93,15 @@ _INTENT_PREFIX: tuple[str, ...] = (
     "end-to-end",
 )
 
-# Cloud-first NIM fallback chain (v0.6+):
-# 1. z-ai/glm-5.2                  — best general-purpose (new primary)
-# 2. minimaxai/minimax-m3          — strong general-purpose
-# 3. moonshotai/kimi-k2.6          — strong reasoning
-# 4. qwen/qwen3.5-397b-a17b        — MoE, efficient
-# 5. deepseek-ai/deepseek-v4-flash — fast fallback
+# Local-first fallback chain (v0.7+):
+# 0. local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf — local default (3.1GB, tool-calling)
+# 1. z-ai/glm-5.2                  — best general-purpose cloud (primary escalation)
+# 2. minimaxai/minimax-m3          — strong general-purpose cloud
+# 3. moonshotai/kimi-k2.6          — strong reasoning cloud
+# 4. qwen/qwen3.5-397b-a17b        — MoE, efficient cloud
+# 5. deepseek-ai/deepseek-v4-flash — fast cloud fallback
 DEFAULT_FALLBACK_CHAIN = (
+    "local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf,"
     "z-ai/glm-5.2,"
     "minimaxai/minimax-m3,"
     "moonshotai/kimi-k2.6,"
@@ -167,11 +164,11 @@ class LiteRouter:
     configurable threshold. State (failure counters, last failure reason)
     is held until ``reset()`` is called.
 
-    With a cloud-first chain (the v0.4+ default), the preferred entry is
-    a cloud model. Low-complexity requests stay on the preferred cloud
-    model; high-complexity ones try the next heavier model in the chain.
-    Local entries in the chain (``local:…``) are only used when the chain
-    explicitly includes them.
+    With a local-first chain (the v0.7+ default), the preferred entry is
+    the local model. Low-complexity requests stay local; high-complexity
+    ones or intent-prefix matches escalate to the first cloud model in
+    the chain. Cloud entries are also used as fallback when local fails
+    repeatedly.
     """
 
     def __init__(
@@ -381,15 +378,14 @@ class LiteRouter:
     ) -> RoutingDecision:
         """Decide which tier + model handles this request.
 
-        Cloud-first logic (v0.4+):
+        Local-first logic (v0.7+):
 
         1. **Escalation override** — if consecutive failures exceed the
            threshold, advance to the next model in the chain.
-        2. **Score + intent** — for cloud-first chains, the preferred
-           model handles most requests. High complexity or complex-intent
-           picks the next heavier cloud model in the chain.
-        3. **Local fallback** — if the chain starts with a local entry,
-           the old behaviour applies (score > threshold → cloud escalation).
+        2. **Score + intent** — for local-first chains, the preferred
+           (local) model handles most requests. High complexity or
+           complex-intent escalates to the first cloud model in the chain.
+        3. **Cloud fallback** — repeated local failures escalate to cloud.
         """
         # 1. Escalation override (highest priority)
         if self._consecutive_cloud_failures >= self.escalate_after_failures:

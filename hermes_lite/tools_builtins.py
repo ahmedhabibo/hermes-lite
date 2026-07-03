@@ -75,6 +75,13 @@ except Exception:  # ImportError, ModuleNotFoundError, etc.
     _ht_web_search = None
     _ht_web_extract = None
 
+# Standalone web search via ddgs (DuckDuckGo Search) — no Hermes Agent needed.
+try:
+    from ddgs import ddgs as _ddgs_client  # type: ignore
+    _STANDALONE_SEARCH = True
+except Exception:
+    _STANDALONE_SEARCH = False
+
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -363,23 +370,41 @@ def _handle_memory(args: MemoryArgs) -> dict[str, Any]:
 
 
 def _handle_web_search(args: WebSearchArgs) -> dict[str, Any]:
-    """Search the web via the parent Hermes runtime if available.
+    """Search the web — uses Hermes runtime if available, ddgs standalone fallback.
 
-    The agent runner exposes :func:`hermes_tools.web_search`. When we
-    aren't running inside the agent we return a successful result with
-    an informative message — never invent data, and never return an
-    error (which would trigger the orchestrator's repeated_error loop).
+    Priority:
+    1. ``hermes_tools.web_search`` (when running inside Hermes Agent)
+    2. ``ddgs`` (DuckDuckGo Search, standalone — no Hermes needed)
+    3. Informative message (no fake data)
     """
-    if _ht_web_search is None:
-        return _ok(
-            "web_search is not available in standalone mode. "
-            "Run hermes-lite inside the Hermes agent runtime to enable web search."
-        )
-    try:
-        result = _ht_web_search(args.query, limit=args.limit)
-        return _ok(json.dumps(result))
-    except Exception as exc:
-        return _err(f"web_search backend failed: {type(exc).__name__}: {exc}")
+    # 1. Hermes runtime backend
+    if _ht_web_search is not None:
+        try:
+            result = _ht_web_search(args.query, limit=args.limit)
+            return _ok(json.dumps(result))
+        except Exception as exc:
+            return _err(f"web_search backend failed: {type(exc).__name__}: {exc}")
+
+    # 2. Standalone ddgs backend
+    if _STANDALONE_SEARCH:
+        try:
+            results = []
+            with _ddgs_client() as ddgs:
+                for r in ddgs.text(args.query, max_results=args.limit):
+                    results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("href", r.get("url", "")),
+                        "description": r.get("body", r.get("snippet", "")),
+                    })
+            return _ok(json.dumps({"results": results}))
+        except Exception as exc:
+            return _err(f"ddgs web_search failed: {type(exc).__name__}: {exc}")
+
+    # 3. No backend available
+    return _ok(
+        "web_search is not available. Install ddgs (pip install ddgs) "
+        "or run inside the Hermes agent runtime."
+    )
 
 
 def _handle_web_fetch(args: WebFetchArgs) -> dict[str, Any]:
