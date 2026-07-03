@@ -889,7 +889,7 @@ class HermesOrchestrator:
                         turn_id=uuid.uuid4().hex[:16],
                         tier="cloud",
                         model=moa_result.aggregator_model,
-                        errors=[r.error for r in moa_result.reference_results if r.error],
+                        errors=[],  # MoAResult.reference_responses is (model_id, text) tuples, no error field
                     )
                 except AllKeysExhausted as exc:
                     logger.warning("MoA: all API keys exhausted (%s), falling back to local ToolLoop", exc)
