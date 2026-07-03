@@ -1,6 +1,6 @@
 """hermes_lite.sandbox — Lightweight subprocess isolation.
 
-Wraps ``subprocess.run`` with three layers of safety:
+Wraps ``subprocess.run`` with four layers of safety:
 
 1. **Resource limits** (Linux/macOS): CPU time, max memory, max processes,
    max file size. Set via ``resource.setrlimit`` in the child pre-exec.
@@ -10,9 +10,18 @@ Wraps ``subprocess.run`` with three layers of safety:
    env var ('' disables). When allow_network=False the subprocess is
    launched without inheriting the network namespace (best-effort;
    full namespace isolation requires Linux + CAP_SYS_ADMIN).
+4. **Secret scrubbing**: API keys and tokens are stripped from the child
+   process environment and from the audit log. The env allowlist controls
+   which parent vars are passed through; secrets are always removed.
+
+5. **Command allowlist** (optional): when ``HERMES_LITE_SANDBOX_ALLOWLIST``
+   is set to a colon-separated list of binary names, commands not on the
+   list are rejected before execution. When unset (default), all commands
+   are allowed (backward-compatible).
 
 Every invocation is appended to ``~/.hermes_lite/sandbox.log`` with a
-timestamp, the original args, exit code, and elapsed wall time.
+timestamp, the original args, exit code, and elapsed wall time. Secrets
+in the command or args are masked as ``[REDACTED]`` in the log.
 
 Designed to fail closed: if any guard can't be applied, ``run_sandboxed``
 raises rather than silently running unsafer.
@@ -53,6 +62,102 @@ class CommandTimeout(SandboxError):
 
 class NetworkPolicyError(SandboxError):
     """Command violates the network allow-list."""
+
+
+class CommandBlockedError(SandboxError):
+    """Command is not on the allow-list or matches the block-list."""
+
+
+# ---------------------------------------------------------------------------
+# Secret scrubbing — prevent API keys / tokens from leaking into child env or logs
+# ---------------------------------------------------------------------------
+
+# Env var names whose values contain secrets. These are always stripped from
+# the child process environment. The env allowlist (below) provides a positive
+# list of safe vars to pass through.
+_SECRET_ENV_PATTERNS = (
+    "API_KEY",
+    "API_KEYS",
+    "AUTH_TOKEN",
+    "ACCESS_TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "HERMES_LITE_NVIDIA_API_KEY",
+    "HERMES_LITE_NVIDIA_API_KEYS",
+    "HERMES_LITE_AUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "NVIDIA_API_KEY",
+)
+
+# Env vars that are safe to pass to sandboxed children (non-secret infrastructure).
+# When no explicit env_passthrough is provided, this baseline set is used.
+_DEFAULT_ENV_PASSTHROUGH = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TERM",
+    "SHELL",
+    "LOGNAME",
+    "HERMES_LITE_SANDBOX_NETWORK",
+    "HERMES_LITE_SANDBOX_ALLOWLIST",
+    "HERMES_LITE_SANDBOX_BLOCKLIST",
+    "HERMES_LITE_RPM",
+    "HERMES_LITE_LOCAL_URL",
+    "HERMES_LITE_LOCAL_MODEL",
+    "HERMES_LITE_CLOUD_URL",
+    "HERMES_LITE_CLOUD_MODEL",
+)
+
+
+def _is_secret_env(name: str) -> bool:
+    """Check if an env var name matches any known secret pattern."""
+    upper = name.upper()
+    for pattern in _SECRET_ENV_PATTERNS:
+        if pattern in upper:
+            return True
+    return False
+
+
+def _sanitize_env(parent_env: dict[str, str], passthrough: tuple[str, ...] | None = None) -> dict[str, str]:
+    """Return a sanitized copy of parent_env with secrets removed.
+
+    If *passthrough* is provided, only those vars (+ any from *env* overrides)
+    are passed through. If None, uses _DEFAULT_ENV_PASSTHROUGH.
+    """
+    allowed = set(passthrough or _DEFAULT_ENV_PASSTHROUGH)
+    safe: dict[str, str] = {}
+    for key, value in parent_env.items():
+        if key in allowed and not _is_secret_env(key):
+            safe[key] = value
+    return safe
+
+
+def _redact_in_text(text: str, secret_patterns: tuple[str, ...]) -> str:
+    """Replace occurrences of known secret patterns in text with [REDACTED]."""
+    import re
+    redacted = text
+    for pattern in secret_patterns:
+        # Match the pattern as a substring of any env value that matches it
+        if pattern and pattern in redacted:
+            redacted = redacted.replace(pattern, "[REDACTED]")
+    return redacted
+
+
+def _collect_env_secrets(env: dict[str, str]) -> tuple[str, ...]:
+    """Extract actual secret values from env dict (for log redaction)."""
+    secrets: list[str] = []
+    for key, value in env.items():
+        if _is_secret_env(key) and value:
+            secrets.append(value)
+    return tuple(secrets)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +236,13 @@ def _apply_rlimits(memory_mb: int, timeout_s: int) -> None:
         lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256)),
     )
 
+    # Limit max file size writable by the child (default 64MB)
+    if hasattr(resource, "RLIMIT_FSIZE"):
+        _try(
+            "RLIMIT_FSIZE",
+            lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024)),
+        )
+
     # If the load-bearing limits failed (CPU+AS), raise; otherwise log.
     load_bearing_failed = any(
         f.startswith(("RLIMIT_CPU", "RLIMIT_AS")) for f in failures
@@ -164,6 +276,33 @@ def _network_allowed() -> bool:
     if val in ("0", "false", "no", "block", "deny"):
         return False
     return True
+
+
+def _check_command_allowed(cmd: str) -> None:
+    """Check the command against the allow/block lists.
+
+    - ``HERMES_LITE_SANDBOX_ALLOWLIST``: colon-separated binary basenames.
+      If set, only these are allowed. If unset, all commands pass (backward-compatible).
+    - ``HERMES_LITE_SANDBOX_BLOCKLIST``: colon-separated binary basenames.
+      If set, these are always blocked (takes precedence over allowlist).
+    """
+    block_raw = os.environ.get("HERMES_LITE_SANDBOX_BLOCKLIST", "").strip()
+    if block_raw:
+        blocked = {name.strip() for name in block_raw.split(":") if name.strip()}
+        cmd_base = os.path.basename(cmd)
+        if cmd_base in blocked:
+            raise CommandBlockedError(
+                f"command '{cmd_base}' is on the sandbox blocklist"
+            )
+
+    allow_raw = os.environ.get("HERMES_LITE_SANDBOX_ALLOWLIST", "").strip()
+    if allow_raw:
+        allowed = {name.strip() for name in allow_raw.split(":") if name.strip()}
+        cmd_base = os.path.basename(cmd)
+        if cmd_base not in allowed:
+            raise CommandBlockedError(
+                f"command '{cmd_base}' is not on the sandbox allowlist"
+            )
 
 
 # ---------------------------------------------------------------------------

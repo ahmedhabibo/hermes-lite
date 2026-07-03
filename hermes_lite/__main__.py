@@ -13,14 +13,39 @@ import sys
 import os
 
 
+def _load_env() -> None:
+    """Load .env from CWD or project root if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
+        # Try CWD first, then project root (where pyproject.toml lives)
+        from pathlib import Path
+        cwd_env = Path.cwd() / ".env"
+        if cwd_env.exists():
+            load_dotenv(cwd_env, override=False)
+            return
+        # Walk up to find pyproject.toml (project root)
+        p = Path(__file__).resolve().parent
+        for _ in range(5):
+            if (p / ".env").exists():
+                load_dotenv(p / ".env", override=False)
+                return
+            if (p / "pyproject.toml").exists():
+                # Project root found but no .env here
+                break
+            p = p.parent
+    except ImportError:
+        pass  # python-dotenv not installed, rely on real env vars
+
+
 def _main() -> None:
+    _load_env()
     # --version flag
     if "--version" in sys.argv or "-V" in sys.argv:
         try:
             from importlib.metadata import version as _pkg_version
             v = _pkg_version("hermes-lite")
         except Exception:
-            v = "0.5.0"
+            v = "0.6.0"
         print(f"hermes-lite {v}")
         return
 

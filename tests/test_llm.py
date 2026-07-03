@@ -36,7 +36,7 @@ def test_route_local_bare():
     assert model == "qwen2.5-3b-instruct-q4_k_m.gguf"
 
 
-@pytest.mark.parametrize("prefix", ["nvidia/", "minimaxai/", "moonshotai/", "qwen/", "deepseek-ai/"])
+@pytest.mark.parametrize("prefix", ["nvidia/", "minimaxai/", "moonshotai/", "qwen/", "deepseek-ai/", "z-ai/"])
 def test_route_cloud_prefix(prefix):
     _, model, tier = _pick_client_and_model(f"{prefix}mymodel")
     assert tier == "cloud"

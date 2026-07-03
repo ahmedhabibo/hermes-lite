@@ -368,8 +368,8 @@ class TestMemory:
 
 class TestWebSearch:
     def test_no_backend_env_falls_back_to_error(self, monkeypatch):
-        """When hermes_tools isn't importable, the tool returns an error
-        rather than faking data."""
+        """When hermes_tools isn't importable, the tool returns a helpful
+        message (ok=True) rather than faking data or crashing the loop."""
         # Force the optional import to look unloaded.
         monkeypatch.setattr(
             "hermes_lite.tools_builtins._ht_web_search", None, raising=False
@@ -379,8 +379,8 @@ class TestWebSearch:
         )
         reg = _make_registry()
         out = reg.call_tool("web_search", {"query": "test"})
-        assert out["ok"] is False
-        assert "not available" in out["error"].lower()
+        assert out["ok"] is True
+        assert "not available" in out["output"].lower()
 
     def test_backend_called_with_query_and_limit(self, monkeypatch):
         """When hermes_tools is present, the tool forwards query/limit."""
@@ -433,8 +433,8 @@ class TestWebFetch:
         )
         reg = _make_registry()
         out = reg.call_tool("web_fetch", {"url": "https://example.com"})
-        assert out["ok"] is False
-        assert "not available" in out["error"].lower()
+        assert out["ok"] is True
+        assert "not available" in out["output"].lower()
 
     def test_backend_called_and_truncated(self, monkeypatch):
         """web_fetch passes url through and respects max_chars."""

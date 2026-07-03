@@ -1,5 +1,36 @@
 """Hermes-Lite: Lightweight tool-execution framework for LLM agents."""
 
+import os
+
+# Load .env on package import so env vars are available before llm.py reads them
+def _load_env() -> None:
+    # Skip .env loading during tests to avoid polluting env
+    if os.getenv("HERMES_LITE_NO_DOTENV"):
+        return
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+
+        # 1. Walk up from this package to find project .env (highest priority)
+        p = Path(__file__).resolve().parent
+        for _ in range(5):
+            env_path = p / ".env"
+            if env_path.exists():
+                load_dotenv(env_path, override=True)  # project .env wins
+                break
+            if (p / "pyproject.toml").exists():
+                break
+            p = p.parent
+
+        # 2. Also load CWD .env if different (for user overrides), but don't override
+        cwd_env = Path.cwd() / ".env"
+        if cwd_env.exists():
+            load_dotenv(cwd_env, override=False)
+    except ImportError:
+        pass  # python-dotenv not installed
+
+_load_env()
+
 from hermes_lite.registry import (
     PluginRegistry,
     ToolDefinition,

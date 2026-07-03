@@ -75,6 +75,9 @@ class TestChatFallbackOnExhaustion:
     @pytest.mark.asyncio
     async def test_chat_falls_back_to_local_on_exhaustion(self):
         """Mock is_exhausted() → True, verify local call."""
+        # Initialize the lazy rotator first so the patch target exists
+        from hermes_lite.llm import _ensure_rotator
+        _ensure_rotator()
         with patch("hermes_lite.llm._key_rotator.is_exhausted", return_value=(True, 30.0)):
             with patch("hermes_lite.llm.AsyncOpenAI") as mock_client_class:
                 mock_client = AsyncMock()

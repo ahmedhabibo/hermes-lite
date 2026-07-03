@@ -64,7 +64,7 @@ try:
     from importlib.metadata import version as _pkg_version
     __version__ = _pkg_version("hermes-lite")
 except Exception:
-    __version__ = "0.5.0"
+    __version__ = "0.6.0"
 
 from hermes_lite.sanitize import sanitize_tool_args, scrub_control_tokens
 
@@ -143,7 +143,7 @@ class ToolLoop:
         self,
         registry: PluginRegistry,
         chat_fn: Callable[[ChatRequest], Any] = chat,
-        max_iterations: int = 4,
+        max_iterations: int = int(os.environ.get("HERMES_LITE_MAX_ITERATIONS", "12")),
         on_tool_call: Callable[[str, str], None] | None = None,
     ) -> None:
         self.registry = registry

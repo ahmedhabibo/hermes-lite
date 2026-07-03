@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## 0.6.0 — Rate-Limit Hardening
+## 0.6.0 — Rate-Limit Hardening + GLM-5.2 Model Support
 **Released**: 2026-07-02
 
 ### Added
@@ -8,13 +8,21 @@
 - **Jittered exponential backoff**: Full jitter on backoff delays (0 to backoff seconds) to reduce thundering herd during rate-limit or API errors.
 - **Key-aware rotation**: When a key hits a 429/401/403, it's marked as failed and the next key in the pool is used, with its own rate limiter.
 - **Exhaustion detection**: `APIKeyRotator.is_exhausted()` now correctly reports when all keys are in cooldown.
+- **GLM-5.2 model support**: `z-ai/glm-5.2` added as the primary default cloud model, replacing `minimaxai/minimax-m3`.
+- **Cloud prefix recognition**: Added `z-ai/` to `_CLOUD_PREFIXES` so GLM-5.2 routes to the cloud endpoint correctly.
 
 ### Changed
+- **Default cloud model**: Changed from `minimaxai/minimax-m3` to `z-ai/glm-5.2` (CLOUD_MODEL_DEFAULT, DEFAULT_FALLBACK_CHAIN).
+- **Fallback chain**: Now 5 models: `z-ai/glm-5.2 → minimaxai/minimax-m3 → moonshotai/kimi-k2.6 → qwen/qwen3.5-397b-a17b → deepseek-ai/deepseek-v4-flash`.
+- **MoA presets**: All 5 presets (council, speed, verification, creative, coding) updated to use `z-ai/glm-5.2` as primary reference and aggregator where applicable.
 - **RateLimiter scope**: Changed from a single module-level singleton to a list of per-key instances, indexed by the key rotator.
 - **Backoff algorithm**: Added jitter (full jitter) to exponential backoff for both rate-limit and server errors.
 - **Logging**: Enhanced debug and warning logs to show jittered backoff values and key rotation details.
+- **Version fallbacks**: Updated hardcoded `0.5.0` fallbacks to `0.6.0` in `orchestrator.py` and `__main__.py`.
 
 ### Fixed
+- **`finish_reason` AttributeError**: `ChatCompletionMessage` has no `finish_reason` — now correctly accessed via `choice.finish_reason` instead of `msg.finish_reason`.
+- **`web_search`/`web_fetch` crash in standalone mode**: When `hermes_tools` is not importable, handlers now return `_ok()` with an informative message instead of `_err()`, preventing the orchestrator's `repeated_error` loop from triggering.
 - **Key exhaustion edge case**: When all keys are exhausted, the `AllKeysExhausted` exception now reports the correct cooldown time (time until the earliest key recovers).
 - **Test compatibility**: Updated existing rate-limiter tests to work with the new per-key design (tests still pass).
 

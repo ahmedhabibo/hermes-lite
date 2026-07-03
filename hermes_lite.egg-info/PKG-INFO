@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: hermes-lite
-Version: 0.5.0
-Summary: Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. MoA orchestration, rate limiting, key rotation, cloud fallback chain, local fallback for offline use.
+Version: 0.6.0
+Summary: Hermes-Lite — cloud-first AI agent via NVIDIA NIM Free API. MoA orchestration, rate limiting with per-key buckets and jittered backoff, key rotation, cloud fallback chain, local fallback for offline use.
 Requires-Python: >=3.9
 License-File: LICENSE
 Requires-Dist: pydantic>=2.0

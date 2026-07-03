@@ -68,7 +68,7 @@ from hermes_lite.tools_builtins import register_builtins as _register_essentials
 SUBAGENT_TOOL_NAME = "subagent"
 SUBAGENT_MAX_TOOL_CALLS = 6           # hard cap on LLM-driven tool calls
 SUBAGENT_MAX_ITERATIONS = 6           # alias — the child loop's max_iterations
-SUBAGENT_WALL_TIMEOUT_S = 60.0        # hard wall-clock kill
+SUBAGENT_WALL_TIMEOUT_S = float(os.environ.get("HERMES_LITE_SUBAGENT_TIMEOUT", "180"))  # hard wall-clock kill
 SUBAGENT_DB_PREFIX = "/tmp/lite-sub-"
 
 DEFAULT_SUBAGENT_LOG_PATH = Path.home() / ".hermes_lite" / "subagents.log"

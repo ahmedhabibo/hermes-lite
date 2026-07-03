@@ -95,7 +95,7 @@ class TestSlashCommands:
         assert "Tier" in response
         assert "Fallback Chain" in response
         # Check that it shows the actual chain (cloud-first: NIM model prefixes)
-        assert "local:" in response or "nvidia/" in response or "minimaxai/" in response
+        assert "local:" in response or "nvidia/" in response or "minimaxai/" in response or "z-ai/" in response
 
     async def test_stats_command_empty(self, orchestrator):
         """

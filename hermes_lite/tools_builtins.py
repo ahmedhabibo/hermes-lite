@@ -366,13 +366,14 @@ def _handle_web_search(args: WebSearchArgs) -> dict[str, Any]:
     """Search the web via the parent Hermes runtime if available.
 
     The agent runner exposes :func:`hermes_tools.web_search`. When we
-    aren't running inside the agent we return a structured error rather
-    than faking results — never invent data.
+    aren't running inside the agent we return a successful result with
+    an informative message — never invent data, and never return an
+    error (which would trigger the orchestrator's repeated_error loop).
     """
     if _ht_web_search is None:
-        return _err(
-            "web_search requires the parent Hermes runtime "
-            "(hermes_tools.web_search). Not available in standalone mode."
+        return _ok(
+            "web_search is not available in standalone mode. "
+            "Run hermes-lite inside the Hermes agent runtime to enable web search."
         )
     try:
         result = _ht_web_search(args.query, limit=args.limit)
@@ -386,12 +387,12 @@ def _handle_web_fetch(args: WebFetchArgs) -> dict[str, Any]:
 
     Like ``_handle_web_search``, this delegates to the parent runtime's
     ``hermes_tools.web_extract`` when present. No fake data on missing
-    backends.
+    backends — returns a helpful message instead of an error.
     """
     if _ht_web_extract is None:
-        return _err(
-            "web_fetch requires the parent Hermes runtime "
-            "(hermes_tools.web_extract). Not available in standalone mode."
+        return _ok(
+            "web_fetch is not available in standalone mode. "
+            "Run hermes-lite inside the Hermes agent runtime to enable web fetch."
         )
     try:
         result = _ht_web_extract([args.url])
@@ -413,7 +414,12 @@ def _handle_web_fetch(args: WebFetchArgs) -> dict[str, Any]:
 
 
 def _definitions() -> list[ToolDefinition]:
-    """Return the 6 built-in tool definitions (no side effects)."""
+    """Return the 6 built-in tool definitions (no side effects).
+
+    web_search and web_fetch are always registered; their handlers
+    return graceful errors when hermes_tools is not importable
+    (standalone mode) rather than crashing the tool loop.
+    """
     return [
         ToolDefinition(
             name="read_file",

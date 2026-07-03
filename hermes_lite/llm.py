@@ -22,9 +22,9 @@ includes a token-bucket rate limiter that throttles automatically:
 Configuration via env vars:
 
 - ``HERMES_LITE_LOCAL_URL``       (default ``http://127.0.0.1:8080/v1``)
-- ``HERMES_LITE_LOCAL_MODEL``     (default ``qwen2.5-7b-instruct-q4_k_m.gguf``)
+- ``HERMES_LITE_LOCAL_MODEL``     (default ``gemma-4-E2B-it-abliterated-Q4_K_M.gguf``)
 - ``HERMES_LITE_CLOUD_URL``       (default ``https://integrate.api.nvidia.com/v1``)
-- ``HERMES_LITE_CLOUD_MODEL``     (default ``minimaxai/minimax-m3``)
+- ``HERMES_LITE_CLOUD_MODEL``     (default ``z-ai/glm-5.2``)
 - ``HERMES_LITE_NVIDIA_API_KEY``  (single key, or first key in pool)
 - ``HERMES_LITE_NVIDIA_API_KEYS`` (comma-separated key pool for rotation)
 - ``HERMES_LITE_LOCAL_TOOLS``     set ``1`` to send tools to local endpoint
@@ -53,10 +53,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 LOCAL_URL_DEFAULT = "http://127.0.0.1:8080/v1"
-LOCAL_MODEL_DEFAULT = "qwen2.5-7b-instruct-q4_k_m.gguf"
+LOCAL_MODEL_DEFAULT = "gemma-4-E2B-it-abliterated-Q4_K_M.gguf"
 
 CLOUD_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
-CLOUD_MODEL_DEFAULT = "minimaxai/minimax-m3"
+CLOUD_MODEL_DEFAULT = "z-ai/glm-5.2"
 
 # When True, tools/tool_choice are sent to the local endpoint just like cloud.
 # Default False because small models + llama-server PEG grammar = 500 errors.
@@ -255,30 +255,35 @@ class APIKeyRotator:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singletons
+# Module-level singletons (lazy initialization — _load_env() must run first)
 # ---------------------------------------------------------------------------
 
-# Initialize the key rotator and per-key rate limiters
-_key_rotator = APIKeyRotator()
-# One RateLimiter per API key in the pool (same order as _key_rotator._keys)
-_per_key_rate_limiters: List[RateLimiter] = [
-    RateLimiter() for _ in range(len(_key_rotator._keys))
-]
+_key_rotator: APIKeyRotator | None = None
+_per_key_rate_limiters: List[RateLimiter] | None = None
+
+
+def _ensure_rotator() -> APIKeyRotator:
+    """Lazily initialize the key rotator and per-key rate limiters.
+
+    This is called on first use (not at import time) so that .env loading
+    via _load_env() in __main__ has a chance to populate env vars first.
+    """
+    global _key_rotator, _per_key_rate_limiters
+    if _key_rotator is None:
+        _key_rotator = APIKeyRotator()
+        _per_key_rate_limiters = [RateLimiter() for _ in range(len(_key_rotator._keys))]
+    return _key_rotator
 
 
 def get_key_rotator() -> APIKeyRotator:
     """Return the module-level API key rotator (for testing/config)."""
-    return _key_rotator
+    return _ensure_rotator()
 
 
-# For backward compatibility, we keep get_rate_limiter but it now returns
-# the first per-key rate limiter if any keys are configured, otherwise a
-# dummy RateLimiter.
-def get_rate_limiter() -> RateLimiter:
-    """Return the module-level cloud rate limiter (for testing/config)."""
-    if _per_key_rate_limiters:
-        return _per_key_rate_limiters[0]
-    return RateLimiter()  # fallback
+def get_per_key_rate_limiters() -> List[RateLimiter]:
+    """Return the list of per-key rate limiters."""
+    _ensure_rotator()
+    return _per_key_rate_limiters  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +335,7 @@ def _cloud_client(key: str | None = None) -> AsyncOpenAI:
     If *key* is omitted, uses the key rotator's current key.
     """
     url, _, _ = _resolve_cloud()
-    api_key = key or _key_rotator.current
+    api_key = key or _ensure_rotator().current
     if not api_key:
         raise RuntimeError(
             "Cloud LLM requested but HERMES_LITE_NVIDIA_API_KEY "
@@ -351,6 +356,7 @@ _CLOUD_PREFIXES = (
     "qwen/",
     "deepseek-ai/",
     "stepfun-ai/",
+    "z-ai/",
 )
 
 
@@ -553,22 +559,24 @@ async def _chat_cloud_with_retry(
     last_exc: Exception | None = None
 
     for attempt in range(max_retries + 1):
+        rotator = _ensure_rotator()
+        limiters = get_per_key_rate_limiters()
         # Check if all keys are exhausted BEFORE attempting
-        exhausted, _ = _key_rotator.is_exhausted()
+        exhausted, _ = rotator.is_exhausted()
         if exhausted:
             raise AllKeysExhausted(
-                len(_key_rotator._keys), _key_rotator.is_exhausted()[1]
+                len(rotator._keys), rotator.is_exhausted()[1]
             )
 
         # Get the current key and its index in the key list
-        key = _key_rotator.current
-        key_index = _key_rotator._index % len(_key_rotator._keys)
+        key = rotator.current
+        key_index = rotator._index % len(rotator._keys)
 
         # Acquire a token for this specific key's rate limiter
-        await _per_key_rate_limiters[key_index].acquire()
+        await limiters[key_index].acquire()
 
         # Use the current key from the rotator (which should be the one we just selected)
-        client = _cloud_client(key=_key_rotator.current)
+        client = _cloud_client(key=rotator.current)
 
         try:
             resp = await client.chat.completions.create(**kwargs)
@@ -588,7 +596,7 @@ async def _chat_cloud_with_retry(
                     max_retries + 1,
                     jittered_backoff,
                 )
-                new_key = _key_rotator.mark_failure()
+                new_key = rotator.mark_failure()
                 if new_key:
                     logger.info("rotated to key ending ...%s", new_key[-4:])
                 await asyncio.sleep(jittered_backoff)
@@ -622,7 +630,7 @@ async def _chat_cloud_with_retry(
                         max_retries + 1,
                         jittered_backoff,
                     )
-                    new_key = _key_rotator.mark_failure()
+                    new_key = rotator.mark_failure()
                     if new_key:
                         logger.info("rotated to key ending ...%s", new_key[-4:])
                     await asyncio.sleep(jittered_backoff)
@@ -682,7 +690,7 @@ def _parse_response(
     return ChatResponse(
         content=content_text,
         tool_calls=tool_calls,
-        finish_reason=msg.finish_reason or "stop",
+        finish_reason=choice.finish_reason or "stop",
         model=model,
         usage=dict(resp.usage) if resp.usage else {},
         tier=tier,
@@ -698,15 +706,23 @@ __all__ = [
     "ChatResponse",
     "AllKeysExhausted",
     "RateLimiter",
-    "get_rate_limiter",
     "get_key_rotator",
+    "get_per_key_rate_limiters",
     "Tier",
     "tool_def",
     "chat",
-    "get_per_key_rate_limiter",
 ]
 
 
 def get_per_key_rate_limiter() -> list[RateLimiter]:
     """Return the list of per-key rate limiters (for testing)."""
-    return _per_key_rate_limiters
+    return get_per_key_rate_limiters()
+
+
+# Backward compat 
+def get_rate_limiter() -> RateLimiter:
+    """Return the first per-key rate limiter (for backward compat)."""
+    limiters = get_per_key_rate_limiters()
+    if limiters:
+        return limiters[0]
+    return RateLimiter()

@@ -297,7 +297,7 @@ class TestCaps:
     async def test_default_timeout_is_60s(self) -> None:
         runner = SubagentRunner()
         assert runner.timeout_s == SUBAGENT_WALL_TIMEOUT_S
-        assert SUBAGENT_WALL_TIMEOUT_S == 60.0
+        assert SUBAGENT_WALL_TIMEOUT_S == 180.0  # default, overridable via HERMES_LITE_SUBAGENT_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +419,6 @@ def test_defaults_are_sane() -> None:
     assert SUBAGENT_TOOL_NAME == "subagent"
     assert SUBAGENT_MAX_TOOL_CALLS == 6
     assert SUBAGENT_MAX_ITERATIONS == 6
-    assert SUBAGENT_WALL_TIMEOUT_S == 60.0
+    assert SUBAGENT_WALL_TIMEOUT_S == 180.0  # default, overridable via HERMES_LITE_SUBAGENT_TIMEOUT
     assert DEFAULT_SUBAGENT_LOG_PATH.name == "subagents.log"
     assert "hermes_lite" in str(DEFAULT_SUBAGENT_LOG_PATH)

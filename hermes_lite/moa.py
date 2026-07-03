@@ -148,10 +148,11 @@ class MoAResult:
 
 
 # ---------------------------------------------------------------------------
-# Built-in presets — all verified-working NIM free-tier models (2026-06-30)
+# Built-in presets — all verified-working NIM free-tier models (2026-07-02)
 #
 # Available NIM free models:
-#   minimaxai/minimax-m3            — general reasoning (primary default)
+#   z-ai/glm-5.2                     — best general-purpose (primary default)
+#   minimaxai/minimax-m3            — strong general reasoning
 #   moonshotai/kimi-k2.6            — strong general model
 #   qwen/qwen3.5-397b-a17b          — MoE, efficient at scale
 #   minimaxai/minimax-m2.7          — general reasoning
@@ -165,12 +166,12 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "council": MoAPreset(
         name="council",
         references=[
-            MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.4, max_tokens=4096),
+            MoAModelConfig(model="z-ai/glm-5.2", temperature=0.4, max_tokens=4096),
             MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.5, max_tokens=4096),
             MoAModelConfig(model="qwen/qwen3.5-397b-a17b", temperature=0.4, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="moonshotai/kimi-k2.6",
+            model="z-ai/glm-5.2",
             temperature=0.2,
             max_tokens=4096,
         ),
@@ -180,12 +181,12 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "speed": MoAPreset(
         name="speed",
         references=[
-            MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.4, max_tokens=2048),
+            MoAModelConfig(model="z-ai/glm-5.2", temperature=0.4, max_tokens=2048),
             MoAModelConfig(model="deepseek-ai/deepseek-v4-flash", temperature=0.5, max_tokens=2048),
             MoAModelConfig(model="qwen/qwen3.5-122b-a10b", temperature=0.4, max_tokens=2048),
         ],
         aggregator=MoAModelConfig(
-            model="minimaxai/minimax-m3",
+            model="z-ai/glm-5.2",
             temperature=0.3,
             max_tokens=4096,
         ),
@@ -200,7 +201,7 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
             MoAModelConfig(model="deepseek-ai/deepseek-v4-pro", temperature=0.1, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="minimaxai/minimax-m3",
+            model="z-ai/glm-5.2",
             temperature=0.05,
             max_tokens=8192,
         ),
@@ -224,12 +225,12 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     "creative": MoAPreset(
         name="creative",
         references=[
-            MoAModelConfig(model="minimaxai/minimax-m3", temperature=0.8, max_tokens=4096),
+            MoAModelConfig(model="z-ai/glm-5.2", temperature=0.8, max_tokens=4096),
             MoAModelConfig(model="moonshotai/kimi-k2.6", temperature=0.9, max_tokens=4096),
             MoAModelConfig(model="qwen/qwen3.5-122b-a10b", temperature=0.7, max_tokens=4096),
         ],
         aggregator=MoAModelConfig(
-            model="minimaxai/minimax-m3",
+            model="z-ai/glm-5.2",
             temperature=0.4,
             max_tokens=8192,
         ),

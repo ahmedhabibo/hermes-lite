@@ -98,12 +98,14 @@ _INTENT_PREFIX: tuple[str, ...] = (
     "end-to-end",
 )
 
-# Cloud-first NIM fallback chain (v0.4+):
-# 1. minimaxai/minimax-m3        — best general-purpose
-# 2. moonshotai/kimi-k2.6        — strong reasoning
-# 3. qwen/qwen3.5-397b-a17b      — MoE, efficient
-# 4. deepseek-ai/deepseek-v4-flash — fast fallback
+# Cloud-first NIM fallback chain (v0.6+):
+# 1. z-ai/glm-5.2                  — best general-purpose (new primary)
+# 2. minimaxai/minimax-m3          — strong general-purpose
+# 3. moonshotai/kimi-k2.6          — strong reasoning
+# 4. qwen/qwen3.5-397b-a17b        — MoE, efficient
+# 5. deepseek-ai/deepseek-v4-flash — fast fallback
 DEFAULT_FALLBACK_CHAIN = (
+    "z-ai/glm-5.2,"
     "minimaxai/minimax-m3,"
     "moonshotai/kimi-k2.6,"
     "qwen/qwen3.5-397b-a17b,"
