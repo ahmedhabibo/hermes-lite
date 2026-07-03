@@ -1,6 +1,6 @@
 # Hermes-Lite ⚡
 
-[![Tests](https://img.shields.io/badge/tests-341%20passing-brightgreen)](./tests)
+[![Tests](https://img.shields.io/badge/tests-463%20passing-brightgreen)](./tests)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 [![Cloud: NVIDIA NIM](https://img.shields.io/badge/cloud-NVIDIA%20NIM-76B900)](https://build.nvidia.com/)
@@ -13,7 +13,7 @@ Hermes-Lite is an agent framework that defaults to cloud LLMs (NVIDIA NIM Free A
 
 ## Why Hermes-Lite?
 
-- ☁️ **Cloud-first, free tier:** NVIDIA NIM Free API gives 40 RPM of production-grade LLMs (MiniMax M3, Kimi K2.6, Qwen 3.5, DeepSeek V4) at zero cost
+- ☁️ **Cloud-first, free tier:** NVIDIA NIM Free API gives 40 RPM of production-grade LLMs (z-ai/glm-5.2, Kimi K2.6, Qwen 3.5, DeepSeek V4) at zero cost
 - 🔄 **Resilient by default:** Token-bucket rate limiter, exponential backoff on 429s, API key rotation from a pool
 - 🏠 **Local fallback:** Switch to a local 7B Qwen model for offline/privacy — same codebase, different prefix
 - 🛡️ **Smart routing:** Complexity-based tier selection. Simple queries → fast model. Complex reasoning → heavy model. Escalation on repeated failures.
@@ -48,24 +48,19 @@ python -m hermes_lite
 # 1. Install llama.cpp
 brew install llama.cpp
 
-# 2. Download the model (Qwen 2.5 7B Instruct, Q4_K_M — 4.4 GB)
-hf download Qwen/Qwen2.5-7B-Instruct-GGUF \
-    qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \
-    qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf \
+# 2. Download the model (Qwen 2.5 Coder 7B Instruct, IQ3_XS — 3.1 GB)
+hf download bartowski/Qwen2.5-Coder-7B-Instruct-IQ3_XS-GGUF \
+    Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf \
     --local-dir ~/.hermes_lite/models/
 
-# 3. Merge and start the server
-llama-gguf-split --merge \
-    ~/.hermes_lite/models/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf \
-    ~/.hermes_lite/models/qwen2.5-7b-instruct-q4_k_m.gguf
-
+# 3. Start the server
 llama-server \
-    -m ~/.hermes_lite/models/qwen2.5-7b-instruct-q4_k_m.gguf \
+    -m ~/.hermes_lite/models/Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf \
     --port 8080 --temp 0.3 --repeat-penalty 1.1 \
-    -ngl 99 -c 4096
+    -ngl 28 -c 65536 --batch-size 512 --cache-type-k q8_0 --cache-type-v q8_0
 
 # 4. Set a local-first fallback chain (or use local: prefix in chat)
-export LITE_FALLBACK_CHAIN="local:qwen2.5-7b-instruct-q4_k_m.gguf,minimaxai/minimax-m3"
+export LITE_FALLBACK_CHAIN="local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf,z-ai/glm-5.2,minimaxai/minimax-m3,moonshotai/kimi-k2.6,qwen/qwen3.5-397b-a17b,deepseek-ai/deepseek-v4-flash"
 
 pip install -e ".[test]"
 python -m hermes_lite
@@ -113,13 +108,13 @@ python -m hermes_lite
 
 Hermes-Lite v0.4+ handles NVIDIA NIM Free API limits automatically:
 
-| Feature | Detail |
-|---------|--------|
-| **Rate limiter** | Token-bucket, 40 RPM (configurable via `HERMES_LITE_RPM`) |
-| **Exponential backoff** | 429 errors: 1s → 2s → 4s → 8s (max 16s) |
-| **Key rotation** | Comma-separated pool in `HERMES_LITE_NVIDIA_API_KEYS`. On 401/403/429, rotates to next key |
-| **Key cooldown** | Failed keys cool down for 60s before reuse |
-| **Max retries** | 4 attempts (configurable via `HERMES_LITE_MAX_RETRIES`) |
+|| Feature | Detail |
+||---------|--------|
+|| **Rate limiter** | Token-bucket, 40 RPM (configurable via `HERMES_LITE_RPM`) |
+|| **Exponential backoff** | 429 errors: 1s → 2s → 4s → 8s (max 16s) |
+|| **Key rotation** | Comma-separated pool in `HERMES_LITE_NVIDIA_API_KEYS`. On 401/403/429, rotates to next key |
+|| **Key cooldown** | Failed keys cool down for 60s before reuse |
+|| **Max retries** | 4 attempts (configurable via `HERMES_LITE_MAX_RETRIES`) |
 
 ---
 
@@ -128,53 +123,54 @@ Hermes-Lite v0.4+ handles NVIDIA NIM Free API limits automatically:
 The default chain (cloud-first):
 
 ```
-minimaxai/minimax-m3           ← preferred (general-purpose)
-  → moonshotai/kimi-k2.6       ← strong reasoning
-    → qwen/qwen3.5-397b-a17b   ← MoE, efficient
-      → deepseek-ai/deepseek-v4-flash  ← fast fallback
+z-ai/glm-5.2           ← preferred (general-purpose)
+  → minimaxai/minimax-m3 ← strong reasoning
+    → moonshotai/kimi-k2.6 ← MoE, efficient
+      → qwen/qwen3.5-397b-a17b ← fast fallback
+        → deepseek-ai/deepseek-v4-flash ← ultra-fast
 ```
 
 Override with `LITE_FALLBACK_CHAIN` env var (comma-separated).
 
-For local-first: `local:qwen2.5-7b-instruct-q4_k_m.gguf,minimaxai/minimax-m3`
+For local-first: `local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf,z-ai/glm-5.2,minimaxai/minimax-m3`
 
 ---
 
 ## Features
 
-| Area | What it does |
-|------|-------------|
-| **Tool registry** | 6 built-in essentials: `read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`. Pydantic-validated dispatch. Extensible via `ToolDefinition`. |
-| **LLM layer** | OpenAI-compatible chat API. Default: cloud NIM (MiniMax M3). Supports local fallback (Qwen 7B via llama.cpp). Rate limiting + key rotation + exponential backoff. |
-| **Tool loop** | Two-tier loop: LLM calls tools → results fed back → LLM responds. Max 4 iterations, repeated-error and malformed-JSON guards. |
-| **Router** | LiteRouter classifies prompts by complexity. Cloud-first chain: light queries → fast model. Complex reasoning → heavier model. Consecutive-failure escalation walks the chain. |
-| **Sandbox** | `terminal` tool runs commands in a macOS sandbox (`sandbox-exec`). Timeout-safe with process lifecycle management. |
-| **Memory** | SQLite bridge for cross-session facts. `add`, `replace`, `remove`, `list` — unique-match semantics. Loaded into every prompt (800 char cap). |
-| **Sub-agent** | Spawn isolated subagents for parallel work (default: cloud NIM flash model). Nested orchestration (max 2 levels). |
-| **MoA** | Mixture-of-Agents: run 3–5 diverse LLMs in parallel, then aggregate into a single superior answer. 5 built-in presets (`council`, `speed`, `verification`, `coding`, `creative`). CLI: `/moa <preset>`. |
-| **Observability** | Per-turn JSONL logging, rotation at 10 MB, `python -m hermes_lite.stats` for session summary. |
-| **CLI** | prompt_toolkit + Rich terminal. Ctrl+C/D, `!tool {args}` direct invocation, `/tools`, `/history`, `/help`. |
+|| Area | What it does |
+||------|-------------|
+|| **Tool registry** | 6 built-in essentials: `read_file`, `search_files`, `terminal`, `memory`, `web_search`, `web_fetch`. Pydantic-validated dispatch. Extensible via `ToolDefinition`. |
+|| **LLM layer** | OpenAI-compatible chat API. Default: cloud NIM (z-ai/glm-5.2). Supports local fallback (Qwen 2.5 Coder 7B via llama.cpp). Rate limiting + key rotation + exponential backoff. |
+|| **Tool loop** | Two-tier loop: LLM calls tools → results fed back → LLM responds. Max 4 iterations, repeated-error and malformed-JSON guards. |
+|| **Router** | LiteRouter classifies prompts by complexity. Cloud-first chain: light queries → fast model. Complex reasoning → heavier model. Consecutive-failure escalation walks the chain. |
+|| **Sandbox** | `terminal` tool runs commands in a macOS sandbox (`sandbox-exec`). Timeout-safe with process lifecycle management. **Sandbox security: command allowlist/blocklist, secret env scrubbing, audit log redaction** |
+|| **Memory** | SQLite bridge for cross-session facts. `add`, `replace`, `remove`, `list` — unique-match semantics. Loaded into every prompt (800 char cap). |
+|| **Sub-agent** | Spawn isolated subagents for parallel work (default: cloud NIM flash model). Nested orchestration (max 2 levels). **Subagent isolation: env sanitization** |
+|| **MoA** | Mixture-of-Agents: run 3–5 diverse LLMs in parallel, then aggregate into a single superior answer. 5 built-in presets (`council`, `speed`, `verification`, `coding`, `creative`). CLI: `/moa <preset>`. |
+|| **Observability** | Per-turn JSONL logging, rotation at 10 MB, `python -m hermes_lite.stats` for session summary. |
+|| **CLI** | prompt_toolkit + Rich terminal. Ctrl+C/D, `!tool {args}` direct invocation, `/tools`, `/history`, `/help`. |
 
 ---
 
 ## Configuration
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `HERMES_LITE_CLOUD_URL` | `https://integrate.api.nvidia.com/v1` | Cloud endpoint |
-| `HERMES_LITE_CLOUD_MODEL` | `minimaxai/minimax-m3` | Default cloud model |
-| `HERMES_LITE_NVIDIA_API_KEY` | — | Single NVIDIA NIM API key |
-| `HERMES_LITE_NVIDIA_API_KEYS` | — | Comma-separated key pool for rotation |
-| `HERMES_LITE_RPM` | `40` | Requests per minute (token bucket) |
-| `HERMES_LITE_MAX_RETRIES` | `4` | Max retry attempts on 429/server errors |
-| `HERMES_LITE_LOCAL_URL` | `http://127.0.0.1:8080/v1` | Local llama.cpp endpoint |
-| `HERMES_LITE_LOCAL_MODEL` | `qwen2.5-7b-instruct-q4_k_m.gguf` | Local model file |
-| `HERMES_LITE_LOCAL_TOOLS` | unset | Set `1` to send `tools`/`tool_choice` to local endpoint |
-| `LITE_LOCAL_MAX_COMPLEXITY` | `0.3` | Max complexity score for using lighter model |
-| `HERMES_LITE_MOA_PRESET` | — | Auto-activate MoA preset on startup (e.g. `council`) |
-| `HERMES_LITE_MOA_TIMEOUT` | `30` | Seconds before a reference model is skipped |
-| `LITE_FALLBACK_CHAIN` | `minimaxai/minimax-m3,moonshotai/kimi-k2.6,...` | Model fallback chain |
-| `HERMES_LITE_SUBAGENT_MODEL` | `deepseek-ai/deepseek-v4-flash` | Subagent default model |
+|| Variable | Default | Purpose |
+||----------|---------|---------|
+|| `HERMES_LITE_CLOUD_URL` | `https://integrate.api.nvidia.com/v1` | Cloud endpoint |
+|| `HERMES_LITE_CLOUD_MODEL` | `z-ai/glm-5.2` | Default cloud model |
+|| `HERMES_LITE_NVIDIA_API_KEY` | — | Single NVIDIA NIM API key |
+|| `HERMES_LITE_NVIDIA_API_KEYS` | — | Comma-separated key pool for rotation |
+|| `HERMES_LITE_RPM` | `40` | Requests per minute (token bucket) |
+|| `HERMES_LITE_MAX_RETRIES` | `4` | Max retry attempts on 429/server errors |
+|| `HERMES_LITE_LOCAL_URL` | `http://127.0.0.1:8080/v1` | Local llama.cpp endpoint |
+|| `HERMES_LITE_LOCAL_MODEL` | `Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf` | Local model file |
+|| `HERMES_LITE_LOCAL_TOOLS` | unset | Set `1` to send `tools`/`tool_choice` to local endpoint |
+|| `LITE_LOCAL_MAX_COMPLEXITY` | `0.3` | Max complexity score for using lighter model |
+|| `HERMES_LITE_MOA_PRESET` | — | Auto-activate MoA preset on startup (e.g. `council`) |
+|| `HERMES_LITE_MOA_TIMEOUT` | `30` | Seconds before a reference model is skipped |
+|| `LITE_FALLBACK_CHAIN` | `z-ai/glm-5.2,minimaxai/minimax-m3,moonshotai/kimi-k2.6,qwen/qwen3.5-397b-a17b,deepseek-ai/deepseek-v4-flash` | Model fallback chain |
+|| `HERMES_LITE_SUBAGENT_MODEL` | `deepseek-ai/deepseek-v4-flash` | Subagent default model |
 
 ---
 
@@ -192,21 +188,21 @@ Run multiple diverse LLMs on the same prompt in parallel, then let an **aggregat
 
 ### Built-in Presets
 
-| Preset | References | Aggregator | Use case |
-|--------|-----------|------------|----------|
-| `council` | minimax-m3, kimi-k2.6, qwen3.5-397b | deepseek-v4-pro | General reasoning — maximum diversity |
-| `speed` | minimax-m3, deepseek-v4-flash | deepseek-v4-flash | Fast answers — lighter models |
-| `verification` | kimi-k2.6, qwen3.5-397b, deepseek-v4-pro | minimax-m3 | Fact-checking — cross-verify claims |
-| `coding` | deepseek-v4-pro, qwen3.5-397b | deepseek-v4-pro | Code generation — precision-focused |
-| `creative` | minimax-m3, kimi-k2.6, qwen3.5-122b | minimax-m3 | Creative writing — divergent styles |
+|| Preset | References | Aggregator | Use case |
+||--------|-----------|------------|----------|
+|| `council` | z-ai/glm-5.2, minimax-m3, kimi-k2.6 | deepseek-v4-pro | General reasoning — maximum diversity |
+|| `speed` | z-ai/glm-5.2, deepseek-v4-flash | deepseek-v4-flash | Fast answers — lighter models |
+|| `verification` | kimi-k2.6, qwen3.5-397b, deepseek-v4-pro | z-ai/glm-5.2 | Fact-checking — cross-verify claims |
+|| `coding` | deepseek-v4-pro, qwen3.5-397b | deepseek-v4-pro | Code generation — precision-focused |
+|| `creative` | z-ai/glm-5.2, kimi-k2.6, qwen3.5-122b | z-ai/glm-5.2 | Creative writing — divergent styles |
 
 ### Commands
 
-| Command | Action |
-|---------|--------|
-| `/moa` | Show status + available presets |
-| `/moa council` | Activate a preset |
-| `/moa off` | Deactivate (back to normal ToolLoop) |
+|| Command | Action |
+||---------|--------|
+|| `/moa` | Show status + available presets |
+|| `/moa council` | Activate a preset |
+|| `/moa off` | Deactivate (back to normal ToolLoop) |
 
 ### Architecture
 
@@ -238,7 +234,7 @@ pip install -e ".[test]"
 python -m pytest tests/ -v
 ```
 
-Tests cover: registry (48), memory (47), orchestrator (31), tool loop (15), tools-essentials (55), LLM (5), router (37), sandbox (30), sub-agent (18), memory bridge (10), observability (6), e2e smoke (5).
+Tests cover: registry (48), memory (47), orchestrator (31), tool loop (15), tools-essentials (55), LLM (5), router (37), sandbox (30+30new), sub-agent (18+1new), memory bridge (10), observability (6), e2e smoke (5), moa 15, api_key_exhaustion 5, sanitize ~20, cli_commands ~10, conftest 1.
 
 ---
 
@@ -255,6 +251,18 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) — PRs welcome, TDD preferred.
 ---
 
 ## CHANGELOG
+
+### 0.6.0 — Security Hardening Phase 1 (Items 1-7)
+2026-07-03
+- **Added:** API key exhaustion handling, Auth/Authorization framework, Input sanitization pipeline, Rate-limit hardening with jitter, Sandbox tightening (command allowlist/blocklist, secret scrubbing, audit log redaction), Secret redaction in logs, Subagent isolation (env sanitization)
+- **Changed:** Default model to z-ai/glm-5.2, local model to Qwen2.5-Coder-7B-Instruct-IQ3_XS (3.1GB)
+- **Tests:** 432 → 463
+
+### 0.5.0 — Toolchain Expansion + Observability
+2026-06-15
+- **Added:** web_fetch tool, memory bridge observability, sandbox-exec timeout propagation, subagent nesting limit (2 levels)
+- **Changed:** Tool loop max iterations increased to 4, MoA preset verification added, local model quantized to IQ3_XS
+- **Tests:** 342 → 432
 
 ### 0.4.0 — Cloud-first NIM pivot + rate limiting
 - **Cloud-first default:** NIM Free API as primary LLM (MiniMax M3, Kimi K2.6, Qwen 3.5, DeepSeek V4 Flash)

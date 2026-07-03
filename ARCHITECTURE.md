@@ -212,7 +212,7 @@ hermes_lite/
 ├── subagent.py          # delegate_task tool
 ├── tools_builtins.py    # 6 essential tools
 └── tests/
-    ├── test_*.py        # 342 tests
+    ├── test_*.py        # 463 tests
 ```
 
 ## MoA Deep Dive
