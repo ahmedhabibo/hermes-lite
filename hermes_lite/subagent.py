@@ -354,6 +354,15 @@ class SubagentRunner:
             ensure_schema,
         )
 
+        # Sanitize env for the child: strip secrets so they don't leak
+        # through tool calls (e.g. terminal env command).
+        from hermes_lite.sandbox import _sanitize_env, _is_secret_env
+        _saved_env = dict(os.environ)
+        _clean_env = _sanitize_env(_saved_env)
+        # Temporarily replace os.environ for the child's duration
+        os.environ.clear()
+        os.environ.update(_clean_env)
+
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         pool = AsyncSQLitePool(self.db_path, min_size=1, max_size=1)
         try:
@@ -395,6 +404,9 @@ class SubagentRunner:
             }
         finally:
             await pool.close()
+            # Restore parent env
+            os.environ.clear()
+            os.environ.update(_saved_env)
 
     def _log_run(self, payload: dict[str, Any]) -> None:
         """Append one JSON line to the audit log. Never raises."""

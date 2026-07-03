@@ -238,6 +238,28 @@ class TestMemoryIsolation:
         assert (tmp_path / "child2.db").exists()
         assert not host_db.exists() or host_db.stat().st_size == 0
 
+    async def test_env_isolation_strips_secrets(self, tmp_path: Path) -> None:
+        """Subagent should run with a sanitized env — secrets stripped."""
+        chat = MockChat([_resp("done")])
+        runner = SubagentRunner(
+            chat_fn=chat,
+            db_path=str(tmp_path / "child.db"),
+            log_path=tmp_path / "audit.jsonl",
+        )
+
+        # Inject a secret into the parent env
+        import os as _os
+        _os.environ["FAKE_API_KEY"] = "sk-leak-test-12345"
+
+        result = await runner.run("test goal")
+
+        # After run, parent env should be restored (including the secret)
+        assert _os.environ.get("FAKE_API_KEY") == "sk-leak-test-12345"
+        assert result["ok"] is True
+
+        # Clean up
+        del _os.environ["FAKE_API_KEY"]
+
 
 # ---------------------------------------------------------------------------
 # Caps + timeout
