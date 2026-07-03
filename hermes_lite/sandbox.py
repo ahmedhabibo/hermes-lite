@@ -176,13 +176,16 @@ class SandboxResult:
     timed_out: bool
 
 
-def _log(entry: SandboxResult) -> None:
+def _log(entry: SandboxResult, secrets: tuple[str, ...] = ()) -> None:
+    # Redact secrets from the command and args before logging
+    log_cmd = _redact_in_text(entry.command, secrets)
+    log_args = [_redact_in_text(a, secrets) for a in entry.args]
     line = (
         f"{int(time.time())}\t"
         f"rc={entry.exit_code}\t"
         f"({entry.elapsed_ms}ms)\t"
-        f"cmd={entry.command}\t"
-        f"args={shlex.join(entry.args)}\n"
+        f"cmd={log_cmd}\t"
+        f"args={shlex.join(log_args)}\n"
     )
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(line)
@@ -337,9 +340,19 @@ def run_sandboxed(
         Optional environment overrides — merged onto os.environ.
     """
     use_args = [cmd] + (args or [])
-    run_env = dict(os.environ)
+    # Check command against allow/block lists before execution
+    _check_command_allowed(cmd)
+    # Build a sanitized environment: strip secrets, only pass allowlisted vars
+    parent_env = dict(os.environ)
+    run_env = _sanitize_env(parent_env)
     if env:
-        run_env.update(env)
+        # User-provided overrides are allowed, but still strip secrets from them too
+        for k, v in env.items():
+            if not _is_secret_env(k):
+                run_env[k] = v
+
+    # Collect actual secret values for log redaction
+    _log_secrets = _collect_env_secrets(parent_env)
 
     started = time.monotonic()
     timed_out = False
@@ -379,6 +392,10 @@ def run_sandboxed(
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
 
+    # Redact secrets from stdout/stderr for the returned result
+    stdout = _redact_in_text(stdout, _log_secrets)
+    stderr = _redact_in_text(stderr, _log_secrets)
+
     result = SandboxResult(
         command=cmd,
         args=args or [],
@@ -394,7 +411,7 @@ def run_sandboxed(
         # Full isolation needs Linux unshare; on macOS this is a no-op guard.
         pass
 
-    _log(result)
+    _log(result, _log_secrets)
     return result
 
 
@@ -405,4 +422,5 @@ __all__ = [
     "CommandTimeout",
     "ResourceLimitError",
     "NetworkPolicyError",
+    "CommandBlockedError",
 ]
