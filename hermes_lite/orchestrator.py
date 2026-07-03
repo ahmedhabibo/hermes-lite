@@ -1086,6 +1086,39 @@ class HermesOrchestrator:
             "Use tools when they help answer the user's question. "
             "When you have enough information to answer directly, respond in plain text without tool calls."
         ]
+
+        # For local models (where tools aren't sent via the API), inject
+        # tool descriptions into the system prompt so the model knows what's
+        # available. The model outputs tool calls as text, which we parse.
+        is_local = (
+            getattr(self, "_force_tier", None) != "cloud"
+            and (
+                self.router.fallback_chain[0].startswith("local:")
+                if self.router.fallback_chain
+                else False
+            )
+        )
+        if is_local:
+            tool_descs = self.get_tool_descriptions()
+            if tool_descs:
+                tool_lines = ["\n\n## Available Tools\n"]
+                tool_lines.append("Call a tool by outputting a JSON object with \"name\" and \"arguments\" keys.")
+                tool_lines.append("Example: {\"name\": \"web_search\", \"arguments\": {\"query\": \"hello world\"}}\n")
+                for d in tool_descs:
+                    name = d.get("name", "")
+                    desc = d.get("description", "")
+                    params = d.get("parameters", {}).get("properties", {})
+                    req = d.get("parameters", {}).get("required", [])
+                    param_strs = []
+                    for pname, pinfo in params.items():
+                        req_mark = " (required)" if pname in req else ""
+                        pdesc = pinfo.get("description", "")[:60]
+                        param_strs.append(f"    \"{pname}\": {pdesc}{req_mark}")
+                    tool_lines.append(f"- **{name}**: {desc}")
+                    if param_strs:
+                        tool_lines.append("  Arguments:")
+                        tool_lines.extend(param_strs)
+                system_parts.append("\n".join(tool_lines))
         if memory_block:
             system_parts.append(memory_block)
 

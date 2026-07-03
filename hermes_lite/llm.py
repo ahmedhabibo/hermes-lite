@@ -417,21 +417,56 @@ _QWEN_TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 
+# Qwen2.5-Coder XML-style tool calls:
+#   <function name="get_weather" arguments='{"city": "Cairo"}' />
+#   <function="get_weather">{...}</function>
+_QWEN_XML_TOOL_RE = re.compile(
+    r'<function\s+name="([^"]+)"\s+arguments=\'([^\']+)\'\s*/?>'
+    r'|<function="([^"]+)">(.*?)</function>',
+    re.DOTALL,
+)
+
 
 def parse_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
     """Extract tool calls from a model's free-form text output.
 
-    Tries four patterns in order of specificity:
+    Tries five patterns in order of specificity:
 
-    1. Qwen 2.5 native format (JSON between blank lines)
-    2. ``tool_call`` code fences
-    3. Any fenced JSON block with ``"name"`` key
-    4. Bare JSON object on its own line with ``"name"`` key
+    1. Qwen2.5-Coder XML-style (``<function name="..." arguments='...' />``)
+    2. Qwen 2.5 native format (JSON between blank lines)
+    3. ``tool_call`` code fences
+    4. Any fenced JSON block with ``"name"`` key
+    5. Bare JSON object on its own line with ``"name"`` key
 
     Returns a list of dicts with keys ``id``, ``name``, and
     ``arguments`` (a JSON string).
     """
     found: list[dict[str, Any]] = []
+
+    # 1. Qwen2.5-Coder XML-style tool calls
+    for m in _QWEN_XML_TOOL_RE.finditer(text):
+        name = m.group(1) or m.group(3)
+        args_raw = m.group(2) or m.group(4)
+        if not name:
+            continue
+        # Parse arguments — could be JSON or key=value pairs
+        try:
+            args = json.loads(args_raw) if args_raw else {}
+        except (json.JSONDecodeError, ValueError):
+            # Try wrapping in braces if model output bare key: value
+            try:
+                args = json.loads("{" + args_raw + "}")
+            except (json.JSONDecodeError, ValueError):
+                args = {}
+        if not isinstance(args, dict):
+            args = {"value": args} if args else {}
+        found.append({
+            "id": f"tc_{len(found)}",
+            "name": name,
+            "arguments": json.dumps(args),
+        })
+    if found:
+        return found
 
     for pattern in (_QWEN_TOOL_CALL_RE, _FENCED_TOOL_RE, _FENCED_JSON_RE, _BARE_JSON_RE):
         for m in pattern.finditer(text):
