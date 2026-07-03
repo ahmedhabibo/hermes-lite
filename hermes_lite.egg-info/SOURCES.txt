@@ -17,6 +17,7 @@ hermes_lite/sandbox.py
 hermes_lite/sanitize.py
 hermes_lite/subagent.py
 hermes_lite/tools_builtins.py
+hermes_lite/webui.py
 hermes_lite.egg-info/PKG-INFO
 hermes_lite.egg-info/SOURCES.txt
 hermes_lite.egg-info/dependency_links.txt

@@ -67,10 +67,15 @@ async def ws_chat(ws: WebSocket):
                 if not prompt:
                     continue
 
-                # Send typing indicator
-                await ws.send_text(json.dumps({"type": "thinking", "model": "z-ai/glm-5.2"}))
+                # Determine model for indicator (local-first)
+                tier = getattr(orch, "_force_tier", None)
+                if tier == "cloud":
+                    model_label = "z-ai/glm-5.2 ☁️"
+                else:
+                    model_label = "local:Qwen2.5-Coder-7B ⚡"
+                await ws.send_text(json.dumps({"type": "thinking", "model": model_label}))
 
-                # Run the prompt through the orchestrator
+                # Run the prompt through the orchestrator (handles /cloud, /local, /help, etc.)
                 try:
                     response = await orch._handle_prompt(prompt)
                     await ws.send_text(json.dumps({
@@ -92,10 +97,16 @@ async def ws_chat(ws: WebSocket):
 
                 await ws.send_text(json.dumps({"type": "stream_start"}))
 
+                # Determine model: local-first, unless /cloud override is active
+                if getattr(orch, "_force_tier", None) == "cloud":
+                    stream_model = os.environ.get("HERMES_LITE_CLOUD_MODEL", "z-ai/glm-5.2")
+                else:
+                    stream_model = "local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf"
+
                 # Use streaming chat
                 req = ChatRequest(
                     messages=[{"role": "user", "content": prompt}],
-                    model=os.environ.get("HERMES_LITE_CLOUD_MODEL", "z-ai/glm-5.2"),
+                    model=stream_model,
                     max_tokens=1024,
                 )
                 try:
@@ -120,7 +131,7 @@ async def ws_chat(ws: WebSocket):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.6.0", "tests": 467}
+    return {"status": "ok", "version": "0.7.0", "tests": 467, "routing": "local-first"}
 
 
 @app.get("/api/sessions")
@@ -185,11 +196,11 @@ header .info { margin-left: auto; font-size: 0.8rem; color: #8b949e; }
 <body>
 <header>
     <div class="logo">⚡ <span>Hermes-Lite</span></div>
-    <div class="badge">v0.6.0</div>
+    <div class="badge">v0.7.0</div>
     <div class="info" id="status">● Connecting...</div>
 </header>
 <div class="messages" id="messages">
-    <div class="msg assistant">Welcome to Hermes-Lite WebUI! Ask me anything — I can use tools, run code, and search the web.</div>
+    <div class="msg assistant">Welcome to Hermes-Lite v0.7 — local-first! ⚡ Default model: Qwen2.5-Coder-7B (local). Type <code>/cloud</code> to force cloud NIM, <code>/local</code> to return to local, <code>/help</code> for all commands.</div>
 </div>
 <div class="input-bar">
     <input type="text" id="prompt" placeholder="Type your message..." autocomplete="off" autofocus />
