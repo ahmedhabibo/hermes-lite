@@ -1,7 +1,7 @@
 """tests/test_tools_essentials.py — One focused test per essential tool.
 
-Each test mocks the underlying backend (filesystem, sandbox, hermes_tools
-web backend, etc.) so the unit is hermetic and fast. They prove:
+Each test mocks the underlying backend (filesystem, sandbox, ddgs/trafilatura
+standalone web backends, etc.) so the unit is hermetic and fast. They prove:
 
 1. Schema rejects malformed args (Pydantic ValidationError → wrapped to
    ToolValidationError by the PluginRegistry).
@@ -368,14 +368,14 @@ class TestMemory:
 
 class TestWebSearch:
     def test_no_backend_env_falls_back_to_error(self, monkeypatch):
-        """When hermes_tools isn't importable, the tool returns a helpful
+        """When ddgs isn't installed, the tool returns a helpful
         message (ok=True) rather than faking data or crashing the loop."""
-        # Force the optional import to look unloaded.
+        # Force the standalone backend to look unloaded.
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_search", None, raising=False
+            "hermes_lite.tools_builtins._ddgs_client", None, raising=False
         )
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_extract", None, raising=False
+            "hermes_lite.tools_builtins._STANDALONE_SEARCH", False, raising=False
         )
         reg = _make_registry()
         out = reg.call_tool("web_search", {"query": "test"})
@@ -383,36 +383,67 @@ class TestWebSearch:
         assert "not available" in out["output"].lower()
 
     def test_backend_called_with_query_and_limit(self, monkeypatch):
-        """When hermes_tools is present, the tool forwards query/limit."""
-        fake_results = {"data": {"web": [{"title": "x", "url": "u", "description": "d"}]}}
+        """When ddgs is present, the tool forwards query/limit and returns
+        results from the standalone DuckDuckGo backend."""
+        fake_results = [{"title": "x", "url": "u", "description": "d"}]
 
-        def fake_search(query, limit=5):
-            assert query == "ls -la"
-            assert limit == 3
-            return fake_results
+        class FakeDDGSInstance:
+            def text(self, query, max_results=5):
+                assert query == "ls -la"
+                assert max_results == 3
+                return iter([
+                    {"title": "x", "href": "u", "body": "d"},
+                ])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class FakeDDGS:
+            def __call__(self):
+                return FakeDDGSInstance()
 
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_search", fake_search, raising=False
+            "hermes_lite.tools_builtins._ddgs_client", FakeDDGS(), raising=False
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._STANDALONE_SEARCH", True, raising=False
         )
         reg = _make_registry()
         out = reg.call_tool("web_search", {"query": "ls -la", "limit": 3})
         assert out["ok"] is True
-        assert json.loads(out["output"]) == fake_results
+        parsed = json.loads(out["output"])
+        assert "results" in parsed
+        assert parsed["results"] == fake_results
 
     def test_backend_exception_surfaces_in_error(self, monkeypatch):
-        """A failure inside the backend is reported, not raised."""
-        def boom(q, limit=5):
-            raise RuntimeError("backend down")
+        """A failure inside the ddgs backend is reported, not raised."""
+        class FakeDDGSInstance:
+            def text(self, query, max_results=5):
+                raise RuntimeError("backend down")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class FakeDDGS:
+            def __call__(self):
+                return FakeDDGSInstance()
 
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_search", boom, raising=False
+            "hermes_lite.tools_builtins._ddgs_client", FakeDDGS(), raising=False
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._STANDALONE_SEARCH", True, raising=False
         )
         reg = _make_registry()
-        # Re-register so the function picks up our patched backend.
-        register_builtins(reg, overwrite=True)
         out = reg.call_tool("web_search", {"query": "x"})
         assert out["ok"] is False
-        assert "backend" in out["error"].lower() or "runtime" in out["error"].lower()
+        assert "ddgs" in out["error"].lower() or "runtime" in out["error"].lower()
 
     def test_schema_rejects_limit_zero(self):
         """limit=0 violates ge=1."""
@@ -429,7 +460,10 @@ class TestWebSearch:
 class TestWebFetch:
     def test_no_backend_returns_error(self, monkeypatch):
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_extract", None, raising=False
+            "hermes_lite.tools_builtins._STANDALONE_FETCH_TRAFILATURA", False, raising=False
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._STANDALONE_FETCH_HTTPX", False, raising=False
         )
         reg = _make_registry()
         out = reg.call_tool("web_fetch", {"url": "https://example.com"})
@@ -437,15 +471,18 @@ class TestWebFetch:
         assert "not available" in out["output"].lower()
 
     def test_backend_called_and_truncated(self, monkeypatch):
-        """web_fetch passes url through and respects max_chars."""
+        """web_fetch passes url through and respects max_chars via trafilatura."""
         long_md = "x" * 8000
 
-        def fake_extract(urls):
-            assert urls == ["https://example.com/long"]
-            return {"results": [{"url": urls[0], "content": long_md}]}
+        def fake_trafilatura(url, max_chars):
+            assert url == "https://example.com/long"
+            return long_md[:max_chars]
 
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_extract", fake_extract, raising=False
+            "hermes_lite.tools_builtins._STANDALONE_FETCH_TRAFILATURA", True, raising=False
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._web_fetch_trafilatura", fake_trafilatura, raising=False
         )
         reg = _make_registry()
         out = reg.call_tool(
@@ -465,17 +502,19 @@ class TestWebFetch:
             )
 
     def test_backend_exception_surfaces_in_error(self, monkeypatch):
-        def boom(urls):
+        def boom(url, max_chars):
             raise RuntimeError("network down")
 
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_extract", boom, raising=False
+            "hermes_lite.tools_builtins._STANDALONE_FETCH_TRAFILATURA", True, raising=False
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._web_fetch_trafilatura", boom, raising=False
         )
         reg = _make_registry()
-        register_builtins(reg, overwrite=True)
         out = reg.call_tool("web_fetch", {"url": "https://x.test"})
         assert out["ok"] is False
-        assert "backend" in out["error"].lower() or "runtime" in out["error"].lower()
+        assert "trafilatura" in out["error"].lower() or "runtime" in out["error"].lower()
 
 
 # ===========================================================================
@@ -507,14 +546,38 @@ class TestToolResultContract:
         # Stub the network backends so web_* don't refuse with "runtime
         # not available" — we want to test shape, not the elegant
         # absent-backend error.
+        class FakeDDGSInstance:
+            def text(self, query, max_results=5):
+                return iter([{"title": "q", "href": "u", "body": "b"}])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class FakeDDGS:
+            def __call__(self):
+                return FakeDDGSInstance()
+
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_search",
-            lambda q, limit=5: {"results": [{"q": q}]},
+            "hermes_lite.tools_builtins._ddgs_client",
+            FakeDDGS(),
             raising=False,
         )
         monkeypatch.setattr(
-            "hermes_lite.tools_builtins._ht_web_extract",
-            lambda urls: {"results": [{"content": "stub"}]},
+            "hermes_lite.tools_builtins._STANDALONE_SEARCH",
+            True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._STANDALONE_FETCH_TRAFILATURA",
+            True,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "hermes_lite.tools_builtins._web_fetch_trafilatura",
+            lambda url, max_chars: "stub",
             raising=False,
         )
         monkeypatch.setenv("HOME", str(tmp_path))

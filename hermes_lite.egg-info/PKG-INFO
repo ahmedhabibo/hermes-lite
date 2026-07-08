@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: hermes-lite
-Version: 0.7.0
+Version: 0.8.0
 Summary: Hermes-Lite — local-first AI agent with local Qwen model + NVIDIA NIM cloud escalation. MoA orchestration, streaming, WebUI, rate limiting, sandbox security, standalone web search via ddgs.
 Author-email: Ahmed Hassan <a.hassan.b.h@gmail.com>
 License: MIT

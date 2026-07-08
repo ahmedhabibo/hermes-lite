@@ -1,5 +1,42 @@
 # CHANGELOG
 
+## 0.8.0 — Decouple from Hermes Agent (Standalone Local-First Agent)
+
+### Summary
+Hermes-Lite is now fully standalone — zero dependency on Hermes Agent runtime.
+Config, memory, routing, and web tool backends are all self-contained.
+
+### Config (standalone since v0.8.0)
+- `~/.hermes_lite/config.yaml` replaces `~/.hermes/config.yaml`
+- `HERMES_LITE_*` env vars replace `HERMES_*` vars
+- `HermesLiteConfig` dataclass with singleton accessor (`get_config()`, `reload_config()`)
+- Optional YAML config (PyYAML optional, pure-stdlib fallback)
+- `is_standalone` property always returns `True`
+
+### Memory (standalone since v0.8.0)
+- `~/.hermes_lite/memory.db` replaces `~/.hermes/memory.db`
+- `MemoryBridge` SQLite layer for cross-session memory (memory + user targets)
+- Async SQLite pool for sessions/messages (separate from Hermes Agent state.db)
+- No Hindsight integration — standalone only
+
+### Routing (standalone since v0.7+)
+- Local-first fallback chain: `local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf` as preferred
+- Cloud escalation via NIM API when complexity > threshold or intent prefix matches
+- `LiteRouter` with complexity scoring (prompt length, context tokens, history, keywords)
+- `LITE_*` env vars for router tuning (separate from Hermes Agent)
+
+### Web Tools (standalone since v0.8.0)
+- `web_search`: DuckDuckGo via `ddgs` (no `hermes_tools` dependency)
+- `web_fetch`: `trafilatura` (preferred) + `httpx`/`html2text` fallback
+- Graceful degradation when optional deps missing — helpful message, no fake data
+- Disable via `HERMES_LITE_WEB_SEARCH_DISABLED=1` / `HERMES_LITE_WEB_FETCH_DISABLED=1`
+
+### Tests
+- Updated `TestWebSearch`, `TestWebFetch`, `TestToolResultContract` in
+  `test_tools_essentials.py` to mock new standalone backends (ddgs/trafilatura)
+  instead of legacy `_ht_web_search`/`_ht_web_extract` (hermes_tools)
+- **467 passed, 0 failures** (2 pre-existing aiosqlite cleanup warnings)
+
 ## 0.6.0 — Security Hardening + Streaming + Docker + CI
 **Released**: 2026-07-03
 

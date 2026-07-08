@@ -9,9 +9,16 @@ Design rules (per the task spec):
   or ``{"ok": False, "error": str, "output": ""}`` on failure. The
   orchestrator formats this for display; tools themselves stay str-able.
 - No circular imports: this module only depends on ``registry``, ``sandbox``,
-  and the Python standard library. Network tools fall back to harmless
-  stubs when ``hermes_tools`` (the parent Hermes runtime helper) is not
-  importable, so unit tests don't require a network connection.
+  ``config``, and the Python standard library.
+
+Standalone backend notes (v0.8.0+)
+----------------------------------
+This module is **fully standalone** — no Hermes Agent dependency.
+
+- ``web_search`` uses ``ddgs`` (DuckDuckGo Search) directly.
+- ``web_fetch`` uses ``httpx`` + ``trafilatura`` for URL extraction.
+- Either backend can be disabled via env var; missing optional
+  dependencies fall back to a helpful message (no fake data).
 """
 
 from __future__ import annotations
@@ -28,6 +35,51 @@ from pydantic import BaseModel, Field
 
 from hermes_lite.registry import PluginRegistry, ToolDefinition
 from hermes_lite.sandbox import SandboxError, run_sandboxed
+
+# ---------------------------------------------------------------------------
+# Optional backend imports — graceful fallback for unit tests.
+# ---------------------------------------------------------------------------
+#
+# v0.8.0+: these backends are standalone.  No Hermes Agent runtime is
+# required or preferred.
+#
+# We use explicit ``Optional`` annotations + ``None`` fallback so static
+# analyzers (pyright) can see the type narrowing on ``if foo is not None``.
+
+from typing import TYPE_CHECKING
+
+# Web search via DuckDuckGo (standalone).
+try:
+    from ddgs import ddgs as _ddgs_client  # type: ignore
+except Exception:
+    _ddgs_client: Any = None
+
+# Web fetch via trafilatura (standalone URL → markdown extraction).
+try:
+    import trafilatura  # type: ignore
+except Exception:
+    trafilatura: Any = None
+
+# Web fetch via httpx + html2text (fallback when trafilatura missing).
+try:
+    import httpx as _httpx  # type: ignore
+except Exception:
+    _httpx: Any = None
+
+try:
+    import html2text as _html2text  # type: ignore
+except Exception:
+    _html2text: Any = None
+
+_STANDALONE_SEARCH = _ddgs_client is not None
+_STANDALONE_FETCH_TRAFILATURA = trafilatura is not None
+_STANDALONE_FETCH_HTTPX = _httpx is not None
+_STANDALONE_FETCH_HTML2TEXT = _html2text is not None
+
+# Type stubs for static checker satisfaction — these don't affect runtime.
+if TYPE_CHECKING:
+    from typing import Callable
+    _ddgs_client_type: "Callable[..., Any] | None" = None
 
 # ---------------------------------------------------------------------------
 # Result shape — every handler returns one of these.
@@ -64,23 +116,129 @@ def _err(msg: str) -> dict[str, Any]:
     return ToolResult(ok=False, output="", error=msg).to_dict()
 
 
-# ---------------------------------------------------------------------------
-# Optional backend imports — graceful fallback for unit tests.
-# ---------------------------------------------------------------------------
+def _web_search_disabled() -> bool:
+    """Whether the standalone web_search backend is disabled via env var."""
+    return os.environ.get("HERMES_LITE_WEB_SEARCH_DISABLED", "0") == "1"
 
-try:  # pragma: no cover — imported only inside agent runtimes
-    from hermes_tools import web_search as _ht_web_search  # type: ignore
-    from hermes_tools import web_extract as _ht_web_extract  # type: ignore
-except Exception:  # ImportError, ModuleNotFoundError, etc.
-    _ht_web_search = None
-    _ht_web_extract = None
 
-# Standalone web search via ddgs (DuckDuckGo Search) — no Hermes Agent needed.
-try:
-    from ddgs import ddgs as _ddgs_client  # type: ignore
-    _STANDALONE_SEARCH = True
-except Exception:
-    _STANDALONE_SEARCH = False
+def _web_fetch_disabled() -> bool:
+    """Whether the standalone web_fetch backend is disabled via env var."""
+    return os.environ.get("HERMES_LITE_WEB_FETCH_DISABLED", "0") == "1"
+
+
+def _web_search_ddgs(query: str, limit: int) -> list[dict[str, str]]:
+    """Run a DuckDuckGo text search using ``ddgs``.
+
+    Returns a list of dicts with keys: ``title``, ``url``, ``description``.
+    Raises whatever ddgs raises on a backend failure — the caller wraps it
+    into the standard error envelope.
+    """
+    if _ddgs_client is None:
+        raise RuntimeError("ddgs backend not installed")
+    client = _ddgs_client
+    results: list[dict[str, str]] = []
+    with client() as ddgs:
+        iterator = ddgs.text(query, max_results=limit)
+        for r in iterator:
+            results.append({
+                "title": r.get("title", ""),
+                "url": r.get("href", r.get("url", "")),
+                "description": r.get("body", r.get("snippet", "")),
+            })
+    return results
+
+
+def _handle_web_search(args: WebSearchArgs) -> dict[str, Any]:
+    """Search the web — standalone via DuckDuckGo only.
+
+    No Hermes Agent runtime is consulted.  Graceful degradation when
+    ``ddgs`` isn't installed: returns a helpful message instead of
+    fake data.
+    """
+    if _web_search_disabled():
+        return _ok(
+            "web_search is disabled via HERMES_LITE_WEB_SEARCH_DISABLED=1."
+        )
+
+    if not _STANDALONE_SEARCH:
+        return _ok(
+            "web_search is not available. Install ddgs (pip install ddgs) "
+            "to enable standalone web search."
+        )
+
+    try:
+        results = _web_search_ddgs(args.query, args.limit)
+    except Exception as exc:
+        return _err(f"ddgs web_search failed: {type(exc).__name__}: {exc}")
+    return _ok(json.dumps({"results": results}))
+
+
+def _web_fetch_trafilatura(url: str, max_chars: int) -> str:
+    """Fetch + extract a URL via trafilatura (returns markdown text)."""
+    if trafilatura is None:
+        raise RuntimeError("trafilatura backend not installed")
+    mod = trafilatura
+    downloaded = mod.fetch_url(url)
+    if downloaded is None:
+        return ""
+    extracted = mod.extract(downloaded, include_comments=False, include_tables=False)
+    return (extracted or "")[:max_chars]
+
+
+def _web_fetch_httpx(url: str, max_chars: int) -> str:
+    """Fetch + extract via httpx + html2text fallback."""
+    if _httpx is None:
+        raise RuntimeError("httpx backend not installed")
+    response = _httpx.get(url, follow_redirects=True, timeout=15.0)
+    response.raise_for_status()
+    html = response.text
+    if _html2text is not None:
+        h2t_mod = _html2text
+        h = h2t_mod.HTML2Text()
+        h.ignore_links = False
+        h.ignore_images = True
+        markdown = h.handle(html)
+    else:
+        # Last resort — return raw html stripped of script/style.
+        import re as _re
+        markdown = _re.sub(r"<script[\s\S]*?</script>", "", html, flags=_re.IGNORECASE)
+        markdown = _re.sub(r"<style[\s\S]*?</style>", "", markdown, flags=_re.IGNORECASE)
+        markdown = _re.sub(r"<[^>]+>", " ", markdown)
+        markdown = _re.sub(r"\s+", " ", markdown).strip()
+    return markdown[:max_chars]
+
+
+def _handle_web_fetch(args: WebFetchArgs) -> dict[str, Any]:
+    """Fetch a URL and return a markdown extraction — standalone.
+
+    Priority:
+    1. ``trafilatura`` (preferred; purpose-built for clean extraction)
+    2. ``httpx`` + ``html2text`` (raw fallback)
+    3. Helpful message when no backend is available (no fake data)
+    """
+    if _web_fetch_disabled():
+        return _ok(
+            "web_fetch is disabled via HERMES_LITE_WEB_FETCH_DISABLED=1."
+        )
+
+    if _STANDALONE_FETCH_TRAFILATURA:
+        try:
+            text = _web_fetch_trafilatura(args.url, args.max_chars)
+            return _ok(text)
+        except Exception as exc:
+            return _err(f"trafilatura web_fetch failed: {type(exc).__name__}: {exc}")
+
+    if _STANDALONE_FETCH_HTTPX:
+        try:
+            text = _web_fetch_httpx(args.url, args.max_chars)
+            return _ok(text)
+        except Exception as exc:
+            return _err(f"httpx web_fetch failed: {type(exc).__name__}: {exc}")
+
+    return _ok(
+        "web_fetch is not available. Install trafilatura (pip install trafilatura) "
+        "or httpx + html2text to enable standalone URL extraction."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,70 +527,6 @@ def _handle_memory(args: MemoryArgs) -> dict[str, Any]:
         bridge.close()
 
 
-def _handle_web_search(args: WebSearchArgs) -> dict[str, Any]:
-    """Search the web — uses Hermes runtime if available, ddgs standalone fallback.
-
-    Priority:
-    1. ``hermes_tools.web_search`` (when running inside Hermes Agent)
-    2. ``ddgs`` (DuckDuckGo Search, standalone — no Hermes needed)
-    3. Informative message (no fake data)
-    """
-    # 1. Hermes runtime backend
-    if _ht_web_search is not None:
-        try:
-            result = _ht_web_search(args.query, limit=args.limit)
-            return _ok(json.dumps(result))
-        except Exception as exc:
-            return _err(f"web_search backend failed: {type(exc).__name__}: {exc}")
-
-    # 2. Standalone ddgs backend
-    if _STANDALONE_SEARCH:
-        try:
-            results = []
-            with _ddgs_client() as ddgs:
-                for r in ddgs.text(args.query, max_results=args.limit):
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", r.get("url", "")),
-                        "description": r.get("body", r.get("snippet", "")),
-                    })
-            return _ok(json.dumps({"results": results}))
-        except Exception as exc:
-            return _err(f"ddgs web_search failed: {type(exc).__name__}: {exc}")
-
-    # 3. No backend available
-    return _ok(
-        "web_search is not available. Install ddgs (pip install ddgs) "
-        "or run inside the Hermes agent runtime."
-    )
-
-
-def _handle_web_fetch(args: WebFetchArgs) -> dict[str, Any]:
-    """Fetch a URL and return a markdown extraction.
-
-    Like ``_handle_web_search``, this delegates to the parent runtime's
-    ``hermes_tools.web_extract`` when present. No fake data on missing
-    backends — returns a helpful message instead of an error.
-    """
-    if _ht_web_extract is None:
-        return _ok(
-            "web_fetch is not available in standalone mode. "
-            "Run hermes-lite inside the Hermes agent runtime to enable web fetch."
-        )
-    try:
-        result = _ht_web_extract([args.url])
-        # ``web_extract`` returns a dict like {"results": [...]}. Flatten
-        # to the first result's content for a clean payload.
-        if isinstance(result, dict) and result.get("results"):
-            text = result["results"][0].get("content", "")
-        else:
-            text = json.dumps(result)
-        text = text[: args.max_chars]
-        return _ok(text)
-    except Exception as exc:
-        return _err(f"web_fetch backend failed: {type(exc).__name__}: {exc}")
-
-
 # ---------------------------------------------------------------------------
 # Public registration helper
 # ---------------------------------------------------------------------------
@@ -442,8 +536,8 @@ def _definitions() -> list[ToolDefinition]:
     """Return the 6 built-in tool definitions (no side effects).
 
     web_search and web_fetch are always registered; their handlers
-    return graceful errors when hermes_tools is not importable
-    (standalone mode) rather than crashing the tool loop.
+    return graceful messages when no standalone backend is installed
+    rather than crashing the tool loop.
     """
     return [
         ToolDefinition(

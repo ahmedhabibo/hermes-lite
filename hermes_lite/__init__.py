@@ -1,4 +1,12 @@
-"""Hermes-Lite: Lightweight tool-execution framework for LLM agents."""
+"""Hermes-Lite: Standalone local-first AI agent.
+
+Hermes-Lite is fully standalone as of v0.8.0.  It does NOT depend on
+Hermes Agent or any related runtime.  All configuration is loaded from
+``HERMES_LITE_*`` environment variables and (optionally) a YAML file at
+``~/.hermes_lite/config.yaml``.
+"""
+
+__version__ = "0.8.0"
 
 import os
 
@@ -60,6 +68,12 @@ from hermes_lite.memory import (
 from hermes_lite.router import LiteRouter, RoutingDecision, parse_fallback_chain
 from hermes_lite.orchestrator import HermesOrchestrator
 from hermes_lite.cli import run_cli, PromptHandler
+from hermes_lite.config import (
+    HermesLiteConfig,
+    get_config,
+    reload_config,
+    DEFAULT_FALLBACK_CHAIN,
+)
 from hermes_lite.tools_builtins import (
     register_builtins,
     ESSENTIAL_TOOL_NAMES,
@@ -146,6 +160,11 @@ __all__ = [
     "HermesOrchestrator",
     "run_cli",
     "PromptHandler",
+    # Config (v0.8.0+)
+    "HermesLiteConfig",
+    "get_config",
+    "reload_config",
+    "DEFAULT_FALLBACK_CHAIN",
     # LLM layer
     "ChatRequest",
     "ChatResponse",

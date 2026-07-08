@@ -4,6 +4,7 @@ pyproject.toml
 hermes_lite/__init__.py
 hermes_lite/__main__.py
 hermes_lite/cli.py
+hermes_lite/config.py
 hermes_lite/llm.py
 hermes_lite/memory.py
 hermes_lite/memory_bridge.py

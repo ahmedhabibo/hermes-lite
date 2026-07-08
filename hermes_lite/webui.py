@@ -20,6 +20,8 @@ import uvicorn
 from hermes_lite.orchestrator import HermesOrchestrator
 from hermes_lite.router import LiteRouter
 
+import argparse
+
 app = FastAPI(title="Hermes-Lite WebUI", version="0.6.0")
 
 # ---------------------------------------------------------------------------
@@ -331,12 +333,15 @@ async def index():
 # ---------------------------------------------------------------------------
 
 def main():
-    port = int(os.environ.get("HERMES_LITE_WEBUI_PORT", "3007"))
-    host = os.environ.get("HERMES_LITE_WEBUI_HOST", "0.0.0.0")
-    print(f"⚡ Hermes-Lite WebUI starting on http://{host}:{port}")
-    print(f"   Tailscale: http://100.121.26.118:{port}")
-    print(f"   Local: http://127.0.0.1:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    parser = argparse.ArgumentParser(description="Hermes-Lite WebUI")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("HERMES_LITE_WEBUI_PORT", "3007")), help="Port to run on")
+    parser.add_argument("--host", type=str, default=os.environ.get("HERMES_LITE_WEBUI_HOST", "0.0.0.0"), help="Host to bind to")
+    args = parser.parse_args()
+
+    print(f"⚡ Hermes-Lite WebUI starting on http://{args.host}:{args.port}")
+    print(f"   Tailscale: http://100.121.26.118:{args.port}")
+    print(f"   Local: http://127.0.0.1:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
