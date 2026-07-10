@@ -1,5 +1,25 @@
 # CHANGELOG
 
+## 0.9.0 — Release-quality packaging polish
+
+### Highlights
+- Hermes-Lite ships as a clean standalone PyPI package — zero Hermes Agent runtime dependency
+- Test suite green: **467 collected, 464 passed (3 slow deselected), 0 failed** — verified post-bump
+- Fresh `dist/` build validated with `twine check` (wheel + sdist)
+- Clean working tree: `egg-info/`, `dist/`, `build/` and transient `smoke/latency.json` moved to `.gitignore`
+- `pyproject.toml` metadata hardened: `Development Status :: 5 - Production/Stable`, standalone keyword + long description
+
+### Changed
+- `pyproject.toml`: `version` → `0.9.0`; Production/Stable classifier; standalone/ddgs keywords
+- `README.md`: test-count badge refreshed to reflect 467-collection baseline
+- `.gitignore`: build artefacts stripped from tracking (no more churn from `pip install -e .` / `python -m build`)
+
+### Verified
+- `pytest tests/ -q -m "not slow"` → 464 passed, 3 deselected (slow), 0 failed
+- `python -m build` → wheel + sdist produced in `dist/`
+- `python -m twine check dist/*` → PASSED for both artefacts
+- Smoke run against `z-ai/glm-5.2` via NVIDIA NIM Free API (see `smoke/latency.json`, gitignored)
+
 ## 0.8.0 — Decouple from Hermes Agent (Standalone Local-First Agent)
 
 ### Summary

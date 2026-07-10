@@ -3,6 +3,7 @@
 [![Tests](https://img.shields.io/badge/tests-467%20passing-brightgreen)](./tests)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
+[![Version 0.9.0](https://img.shields.io/badge/version-0.9.0-blue)](./CHANGELOG.md)
 [![Cloud: NVIDIA NIM](https://img.shields.io/badge/cloud-NVIDIA%20NIM-76B900)](https://build.nvidia.com/)
 
 > **Cloud-first AI agent via NVIDIA NIM Free API — with local fallback for offline use.**

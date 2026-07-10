@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-lite"
-version = "0.8.0"
+version = "0.9.0"
 description = "Hermes-Lite — Fully standalone local-first AI agent. Local Qwen model + NVIDIA NIM cloud escalation. MoA orchestration, streaming, WebUI, rate limiting, sandbox security, standalone web search (ddgs) + URL extraction (trafilatura/httpx). No Hermes Agent dependency."
 readme = "README.md"
 license = {text = "MIT"}
