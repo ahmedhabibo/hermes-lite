@@ -26,3 +26,9 @@ venv/
 
 # ---- macOS ----
 .DS_Store
+
+# ---- python build artefacts ----
+hermes_lite.egg-info/
+dist/
+build/
+smoke/latency.json
