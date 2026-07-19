@@ -14,7 +14,6 @@ Config (env vars):
 
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -27,6 +26,30 @@ _ALLOWED_PERSONAS = {"concise", "balanced", "verbose"}
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
+
+
+def _config_persona() -> str:
+    """Return persona name from canonical config (single source of truth).
+
+    Falls back to env if config has not been initialized yet, so callers
+    like the CLI that pre-import ``prompts`` still work during cold start.
+    """
+    try:
+        from hermes_lite.config import get_config
+        return get_config().persona or "balanced"
+    except Exception:
+        import os
+        return os.environ.get("HERMES_LITE_PERSONA") or "balanced"
+
+
+def _config_override() -> str | None:
+    """Return prompt override path from canonical config (env fallback)."""
+    try:
+        from hermes_lite.config import get_config
+        return get_config().prompt_override or None
+    except Exception:
+        import os
+        return os.environ.get("HERMES_LITE_PROMPT_OVERRIDE") or None
 
 
 @lru_cache(maxsize=8)
@@ -68,11 +91,11 @@ def build_system_prompt(
 
     Order: identity + tools + loop + style + persona overlay + extra.
     """
-    override = os.environ.get("HERMES_LITE_PROMPT_OVERRIDE")
+    override = _config_override()
     base = _load_system(override)
     parts = [base]
 
-    p = (persona or os.environ.get("HERMES_LITE_PERSONA") or "balanced").lower()
+    p = (persona or _config_persona()).lower()
     if p not in _ALLOWED_PERSONAS:
         raise ValueError(f"Unknown persona: {p}. Allowed: {_ALLOWED_PERSONAS}")
 

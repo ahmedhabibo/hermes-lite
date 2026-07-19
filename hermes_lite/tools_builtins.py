@@ -117,13 +117,15 @@ def _err(msg: str) -> dict[str, Any]:
 
 
 def _web_search_disabled() -> bool:
-    """Whether the standalone web_search backend is disabled via env var."""
-    return os.environ.get("HERMES_LITE_WEB_SEARCH_DISABLED", "0") == "1"
+    """Whether the standalone web_search backend is disabled via config."""
+    from hermes_lite.config import get_config
+    return get_config().web_search_disabled
 
 
 def _web_fetch_disabled() -> bool:
-    """Whether the standalone web_fetch backend is disabled via env var."""
-    return os.environ.get("HERMES_LITE_WEB_FETCH_DISABLED", "0") == "1"
+    """Whether the standalone web_fetch backend is disabled via config."""
+    from hermes_lite.config import get_config
+    return get_config().web_fetch_disabled
 
 
 def _web_search_ddgs(query: str, limit: int) -> list[dict[str, str]]:

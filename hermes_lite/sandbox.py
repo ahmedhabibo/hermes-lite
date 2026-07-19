@@ -275,7 +275,13 @@ def _drop_privileges() -> None:
 
 def _network_allowed() -> bool:
     """Decide whether outbound network is allowed for this command."""
-    val = os.environ.get("HERMES_LITE_SANDBOX_NETWORK", "allow").lower()
+    # Live env wins over cached config so tests/monkeypatch keep working.
+    val = os.environ.get("HERMES_LITE_SANDBOX_NETWORK")
+    if val is None:
+        from hermes_lite.config import get_config
+
+        val = get_config().sandbox_network
+    val = str(val).lower()
     if val in ("0", "false", "no", "block", "deny"):
         return False
     return True
@@ -289,7 +295,13 @@ def _check_command_allowed(cmd: str) -> None:
     - ``HERMES_LITE_SANDBOX_BLOCKLIST``: colon-separated binary basenames.
       If set, these are always blocked (takes precedence over allowlist).
     """
-    block_raw = os.environ.get("HERMES_LITE_SANDBOX_BLOCKLIST", "").strip()
+    # Prefer live env so unit tests can monkeypatch without reload_config().
+    block_raw = os.environ.get("HERMES_LITE_SANDBOX_BLOCKLIST")
+    if block_raw is None:
+        from hermes_lite.config import get_config
+
+        block_raw = get_config().sandbox_blocklist or ""
+    block_raw = block_raw.strip()
     if block_raw:
         blocked = {name.strip() for name in block_raw.split(":") if name.strip()}
         cmd_base = os.path.basename(cmd)
@@ -298,7 +310,12 @@ def _check_command_allowed(cmd: str) -> None:
                 f"command '{cmd_base}' is on the sandbox blocklist"
             )
 
-    allow_raw = os.environ.get("HERMES_LITE_SANDBOX_ALLOWLIST", "").strip()
+    allow_raw = os.environ.get("HERMES_LITE_SANDBOX_ALLOWLIST")
+    if allow_raw is None:
+        from hermes_lite.config import get_config
+
+        allow_raw = get_config().sandbox_allowlist or ""
+    allow_raw = allow_raw.strip()
     if allow_raw:
         allowed = {name.strip() for name in allow_raw.split(":") if name.strip()}
         cmd_base = os.path.basename(cmd)

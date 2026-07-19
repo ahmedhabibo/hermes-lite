@@ -43,75 +43,55 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Literal, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, List, Literal, Optional, Tuple
 
 from openai import AsyncOpenAI
+
+from hermes_lite.config import (
+    CLOUD_MODEL_DEFAULT,
+    CLOUD_URL_DEFAULT,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RPM,
+    LOCAL_MODEL_DEFAULT,
+    LOCAL_URL_DEFAULT,
+    get_config,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Endpoint resolution
+# Endpoint resolution (via canonical config)
 # ---------------------------------------------------------------------------
 
-LOCAL_URL_DEFAULT = "http://127.0.0.1:8080/v1"
-LOCAL_MODEL_DEFAULT = "Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf"
 
-CLOUD_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
-CLOUD_MODEL_DEFAULT = "z-ai/glm-5.2"
-
-# When True, tools/tool_choice are sent to the local endpoint just like cloud.
-# Default False because small models + llama-server PEG grammar = 500 errors.
-_LOCAL_TOOLS_ENABLED = os.environ.get("HERMES_LITE_LOCAL_TOOLS", "0") == "1"
+def _local_tools_enabled() -> bool:
+    return get_config().local_tools_enabled
 
 
 def _resolve_local() -> tuple[str, str]:
-    return (
-        os.environ.get("HERMES_LITE_LOCAL_URL", LOCAL_URL_DEFAULT),
-        os.environ.get("HERMES_LITE_LOCAL_MODEL", LOCAL_MODEL_DEFAULT),
-    )
+    cfg = get_config()
+    return cfg.local_url, cfg.local_model
 
 
 def _resolve_cloud() -> tuple[str, str, str | None]:
-    url = os.environ.get("HERMES_LITE_CLOUD_URL", CLOUD_URL_DEFAULT)
-    model = os.environ.get("HERMES_LITE_CLOUD_MODEL", CLOUD_MODEL_DEFAULT)
-    # Single key from HERMES_LITE_NVIDIA_API_KEY, or fall back to NVIDIA_API_KEY
-    api_key = os.environ.get(
-        "HERMES_LITE_NVIDIA_API_KEY"
-    ) or os.environ.get("NVIDIA_API_KEY", "")
-    return url, model, api_key
+    cfg = get_config()
+    return cfg.cloud_url, cfg.cloud_model, cfg.cloud_api_key or None
 
 
 def _resolve_api_key_pool() -> list[str]:
-    """Return the list of available API keys for rotation.
-
-    Reads ``HERMES_LITE_NVIDIA_API_KEYS`` (comma-separated) first.
-    Falls back to ``HERMES_LITE_NVIDIA_API_KEY`` / ``NVIDIA_API_KEY``.
-    Deduplicates and drops empty values.
-    """
-    raw = os.environ.get("HERMES_LITE_NVIDIA_API_KEYS", "").strip()
-    if raw:
-        keys = [k.strip() for k in raw.split(",") if k.strip()]
-    else:
-        single = os.environ.get("HERMES_LITE_NVIDIA_API_KEY") or os.environ.get(
-            "NVIDIA_API_KEY", ""
-        )
-        keys = [single] if single.strip() else []
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    unique: list[str] = []
-    for k in keys:
-        if k not in seen:
-            seen.add(k)
-            unique.append(k)
-    return unique
+    """Return the list of available API keys for rotation."""
+    cfg = get_config()
+    if cfg.cloud_api_keys:
+        return list(cfg.cloud_api_keys)
+    if cfg.cloud_api_key:
+        return [cfg.cloud_api_key]
+    return []
 
 
 # ---------------------------------------------------------------------------
 # Rate limiter — token bucket for NIM Free API (40 RPM default per key)
 # ---------------------------------------------------------------------------
 
-DEFAULT_RPM = 40
-DEFAULT_MAX_RETRIES = 4
 _BACKOFF_BASE = 1.0  # seconds
 _BACKOFF_CAP = 16.0  # max single backoff
 
@@ -124,7 +104,7 @@ class RateLimiter:
     """
 
     def __init__(self, rpm: int | None = None) -> None:
-        rpm = rpm or int(os.environ.get("HERMES_LITE_RPM", str(DEFAULT_RPM)))
+        rpm = rpm if rpm is not None else get_config().rpm
         self._rpm = max(1, rpm)
         self._max_tokens = float(self._rpm)  # bucket size = 1 minute budget
         self._refill_per_sec = self._rpm / 60.0
@@ -537,11 +517,11 @@ async def chat(req: ChatRequest) -> ChatResponse:
     - Falls back to local model if all API keys are exhausted
     """
     client_factory, model, tier = _pick_client_and_model(req.model)
-    max_retries = int(os.environ.get("HERMES_LITE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
+    max_retries = get_config().max_retries
 
     # For local models, skip sending `tools` / `tool_choice` so llama-server
     # does NOT build a PEG grammar.
-    send_tools = bool(req.tools) and (tier != "local" or _LOCAL_TOOLS_ENABLED)
+    send_tools = bool(req.tools) and (tier != "local" or _local_tools_enabled())
 
     kwargs: dict[str, Any] = {
         "model": model,
@@ -755,7 +735,7 @@ __all__ = [
 # Streaming support
 # ---------------------------------------------------------------------------
 
-async def chat_stream(req: ChatRequest) -> Any:
+async def chat_stream(req: ChatRequest) -> AsyncGenerator[str, None]:
     """Stream LLM response token-by-token.
 
     Returns an async generator that yields chunks (deltas) as they arrive.
@@ -785,14 +765,14 @@ async def chat_stream(req: ChatRequest) -> Any:
         "stream": True,
     }
     # Don't send tools to local unless explicitly enabled
-    send_tools = bool(req.tools) and (tier != "local" or _LOCAL_TOOLS_ENABLED)
+    send_tools = bool(req.tools) and (tier != "local" or _local_tools_enabled())
     if send_tools:
         kwargs["tools"] = req.tools
         kwargs["tool_choice"] = req.tool_choice
     kwargs.update(req.extra)
 
     if tier == "cloud":
-        max_retries = int(os.environ.get("HERMES_LITE_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
+        max_retries = get_config().max_retries
         try:
             async for text in _chat_cloud_stream_with_retry(
                 client_factory, kwargs, model, tier, req, max_retries
@@ -824,7 +804,7 @@ async def _chat_cloud_stream_with_retry(
     tier: Tier,
     req: ChatRequest,
     max_retries: int,
-) -> Any:
+) -> AsyncGenerator[str, None]:
     """Cloud streaming with per-key rate limiting, backoff, and key rotation."""
     from openai import (
         APIStatusError,

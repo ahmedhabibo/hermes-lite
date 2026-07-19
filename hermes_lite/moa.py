@@ -239,11 +239,17 @@ BUILTIN_PRESETS: dict[str, MoAPreset] = {
     ),
 }
 
-# Resolve env overrides for defaults
-_DEFAULT_REF_TEMP = float(os.environ.get("HERMES_LITE_MOA_REF_TEMPERATURE", "0.4"))
-_DEFAULT_AGG_TEMP = float(os.environ.get("HERMES_LITE_MOA_AGG_TEMPERATURE", "0.2"))
-_DEFAULT_MAX_TOKENS = int(os.environ.get("HERMES_LITE_MOA_MAX_TOKENS", "4096"))
-_DEFAULT_TIMEOUT_S = float(os.environ.get("HERMES_LITE_MOA_TIMEOUT_S", "60"))
+def _moa_defaults() -> tuple[float, float, int, float]:
+    """Reference/agg temps, max tokens, timeout from canonical config."""
+    from hermes_lite.config import get_config
+
+    cfg = get_config()
+    return (
+        cfg.moa_ref_temperature,
+        cfg.moa_agg_temperature,
+        cfg.moa_max_tokens,
+        cfg.moa_timeout_s,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +276,8 @@ class MoAEngine:
     ) -> None:
         self.preset = preset or BUILTIN_PRESETS["council"]
         self.chat_fn = chat_fn or chat
-        self.timeout_s = timeout_s or _DEFAULT_TIMEOUT_S
+        _, _, _, default_timeout = _moa_defaults()
+        self.timeout_s = timeout_s if timeout_s is not None else default_timeout
         # Limit concurrent reference calls to avoid exhausting the 40 RPM token bucket
         self._ref_semaphore = asyncio.Semaphore(2)
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
 import uuid
 from pathlib import Path
@@ -17,12 +16,14 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
+from hermes_lite.config import get_config
 from hermes_lite.orchestrator import HermesOrchestrator
+from hermes_lite.orchestrator import __version__ as PKG_VERSION
 from hermes_lite.router import LiteRouter
 
 import argparse
 
-app = FastAPI(title="Hermes-Lite WebUI", version="0.6.0")
+app = FastAPI(title="Hermes-Lite WebUI", version=PKG_VERSION)
 
 # ---------------------------------------------------------------------------
 # Session management
@@ -68,12 +69,19 @@ async def ws_chat(ws: WebSocket):
                 if not prompt:
                     continue
 
-                # Determine model for indicator (local-first)
-                tier = getattr(orch, "_force_tier", None)
-                if tier == "cloud":
-                    model_label = "z-ai/glm-5.2 ☁️"
+                # Determine model label from config (not hardcoded strings).
+                label_cfg = get_config()
+                force_tier = getattr(orch, "force_tier", None)
+                if force_tier == "cloud":
+                    cloud_short = label_cfg.cloud_model.split("/")[-1] or label_cfg.cloud_model
+                    model_label = f"cloud:{cloud_short} ☁️"
                 else:
-                    model_label = "local:Qwen2.5-Coder-7B ⚡"
+                    local_short = (
+                        label_cfg.local_model.split(".")[0]
+                        if label_cfg.local_model
+                        else "local"
+                    )
+                    model_label = f"local:{local_short} ⚡"
                 await ws.send_text(json.dumps({"type": "thinking", "model": model_label}))
 
                 # Run the prompt through the orchestrator (handles /cloud, /local, /help, etc.)
@@ -96,20 +104,24 @@ async def ws_chat(ws: WebSocket):
                 if not prompt:
                     continue
 
-                await ws.send_text(json.dumps({"type": "stream_start"}))
-
-                # Route through orchestrator (handles tools, memory, commands)
+                # Real token streaming via orchestrator -> chat_stream.
+                # Tool-requiring prompts still fall back to the full
+                # batch response — they finish fast and the client sees
+                # the complete reply with a stream_end signal.
                 try:
-                    response = await orch._handle_prompt(prompt)
-                    # Simulate streaming by sending in chunks
-                    chunk_size = 80
-                    for i in range(0, len(response), chunk_size):
-                        chunk = response[i:i + chunk_size]
-                        await ws.send_text(json.dumps({"type": "stream_delta", "content": chunk}))
-                        await asyncio.sleep(0.01)  # small delay for visual effect
+                    await ws.send_text(json.dumps({"type": "stream_start"}))
+                    async for token in orch.stream_prompt(prompt):
+                        if token:
+                            await ws.send_text(json.dumps({
+                                "type": "stream_delta",
+                                "content": token,
+                            }))
                     await ws.send_text(json.dumps({"type": "stream_end"}))
                 except Exception as e:
-                    await ws.send_text(json.dumps({"type": "error", "content": f"Stream error: {e}"}))
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "content": f"Stream error: {e}",
+                    }))
 
     except WebSocketDisconnect:
         pass
@@ -126,7 +138,11 @@ async def ws_chat(ws: WebSocket):
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": "0.7.0", "tests": 467, "routing": "local-first"}
+    return {
+        "status": "ok",
+        "version": app.version,
+        "routing": "local-first",
+    }
 
 
 @app.get("/api/sessions")
@@ -191,11 +207,11 @@ header .info { margin-left: auto; font-size: 0.8rem; color: #8b949e; }
 <body>
 <header>
     <div class="logo">⚡ <span>Hermes-Lite</span></div>
-    <div class="badge">v0.7.0</div>
+    <div class="badge">__HERMES_VERSION__</div>
     <div class="info" id="status">● Connecting...</div>
 </header>
 <div class="messages" id="messages">
-    <div class="msg assistant">Welcome to Hermes-Lite v0.7 — local-first! ⚡ Default model: Qwen2.5-Coder-7B (local). Type <code>/cloud</code> to force cloud NIM, <code>/local</code> to return to local, <code>/help</code> for all commands.</div>
+    <div class="msg assistant">Welcome to Hermes-Lite <span id="version-tag">__HERMES_VERSION__</span> — local-first! ⚡ Default model: <span id="model-tag">local:Qwen2.5-Coder-7B</span>. Type <code>/cloud</code> to force cloud NIM, <code>/local</code> to return to local, <code>/help</code> for all commands.</div>
 </div>
 <div class="input-bar">
     <input type="text" id="prompt" placeholder="Type your message..." autocomplete="off" autofocus />
@@ -325,7 +341,15 @@ connect();
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTML_PAGE
+    cfg = get_config()
+    version_tag = f"v{app.version}"
+    local_tag = f"local:{cfg.local_model.split('.')[0] if cfg.local_model else ''}"
+    rendered = (
+        HTML_PAGE
+        .replace("__HERMES_VERSION__", version_tag)
+        .replace("local:Qwen2.5-Coder-7B", local_tag)
+    )
+    return rendered
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +357,11 @@ async def index():
 # ---------------------------------------------------------------------------
 
 def main():
+    from hermes_lite.config import get_config
+    cfg = get_config()
     parser = argparse.ArgumentParser(description="Hermes-Lite WebUI")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("HERMES_LITE_WEBUI_PORT", "3007")), help="Port to run on")
-    parser.add_argument("--host", type=str, default=os.environ.get("HERMES_LITE_WEBUI_HOST", "0.0.0.0"), help="Host to bind to")
+    parser.add_argument("--port", type=int, default=cfg.webui_port, help="Port to run on")
+    parser.add_argument("--host", type=str, default=cfg.webui_host, help="Host to bind to")
     args = parser.parse_args()
 
     print(f"⚡ Hermes-Lite WebUI starting on http://{args.host}:{args.port}")

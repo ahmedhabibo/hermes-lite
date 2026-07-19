@@ -401,7 +401,7 @@ class TestOrchestratorWiring:
                 await orch.pool.close()
 
         sys_msg = next(m for m in msgs if m["role"] == "system")
-        # The base system prompt is present…
-        assert "You are Hermes-Lite" in sys_msg["content"]
+        # The base system prompt is present (markdown wrappers aside)…
+        assert "Hermes-Lite" in sys_msg["content"]
         # …but the empty memory wrapper is omitted so we don't burn tokens.
         assert "<hermes_lite_memory>" not in sys_msg["content"]

@@ -47,17 +47,16 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from hermes_lite.config import (
+    DEFAULT_ESCALATE_AFTER_FAILURES,
+    DEFAULT_FALLBACK_CHAIN,
+    DEFAULT_LARGE_CONTEXT_TOKENS,
+    DEFAULT_LARGE_HISTORY_TURNS,
+    DEFAULT_LARGE_PROMPT_CHARS,
+    DEFAULT_LOCAL_MAX_COMPLEXITY,
+    get_config,
+)
 from hermes_lite.llm import Tier
-
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-
-DEFAULT_LOCAL_MAX_COMPLEXITY = 0.7
-DEFAULT_ESCALATE_AFTER_FAILURES = 2
-DEFAULT_LARGE_PROMPT_CHARS = 2_000
-DEFAULT_LARGE_CONTEXT_TOKENS = 4_000
-DEFAULT_LARGE_HISTORY_TURNS = 4
 
 # Each keyword contributes up to 1/4 of the 0.2 keyword weight.
 _KEYWORDS: tuple[str, ...] = (
@@ -93,21 +92,8 @@ _INTENT_PREFIX: tuple[str, ...] = (
     "end-to-end",
 )
 
-# Local-first fallback chain (v0.7+):
-# 0. local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf — local default (3.1GB, tool-calling)
-# 1. z-ai/glm-5.2                  — best general-purpose cloud (primary escalation)
-# 2. minimaxai/minimax-m3          — strong general-purpose cloud
-# 3. moonshotai/kimi-k2.6          — strong reasoning cloud
-# 4. qwen/qwen3.5-397b-a17b        — MoE, efficient cloud
-# 5. deepseek-ai/deepseek-v4-flash — fast cloud fallback
-DEFAULT_FALLBACK_CHAIN = (
-    "local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf,"
-    "z-ai/glm-5.2,"
-    "minimaxai/minimax-m3,"
-    "moonshotai/kimi-k2.6,"
-    "qwen/qwen3.5-397b-a17b,"
-    "deepseek-ai/deepseek-v4-flash"
-)
+# String form kept for parse_fallback_chain / tests that pass a CSV default.
+DEFAULT_FALLBACK_CHAIN_CSV = ",".join(DEFAULT_FALLBACK_CHAIN)
 
 
 # ---------------------------------------------------------------------------
@@ -181,47 +167,40 @@ class LiteRouter:
         large_history_turns: int | None = None,
         fallback_chain: list[str] | None = None,
     ) -> None:
-        # Defaults overridable via env then explicit kwargs.
+        # Defaults from get_config(); explicit kwargs win.
+        cfg = get_config()
         self.local_max_complexity = float(
             local_max_complexity
             if local_max_complexity is not None
-            else os.environ.get("LITE_LOCAL_MAX_COMPLEXITY", DEFAULT_LOCAL_MAX_COMPLEXITY)
+            else cfg.local_max_complexity
         )
         self.escalate_after_failures = int(
             escalate_after_failures
             if escalate_after_failures is not None
-            else os.environ.get(
-                "LITE_ESCALATE_AFTER_FAILURES", DEFAULT_ESCALATE_AFTER_FAILURES
-            )
+            else cfg.escalate_after_failures
         )
         self.large_prompt_chars = int(
             large_prompt_chars
             if large_prompt_chars is not None
-            else os.environ.get("LITE_LARGE_PROMPT_CHARS", DEFAULT_LARGE_PROMPT_CHARS)
+            else cfg.large_prompt_chars
         )
         self.large_context_tokens = int(
             large_context_tokens
             if large_context_tokens is not None
-            else os.environ.get("LITE_LARGE_CONTEXT_TOKENS", DEFAULT_LARGE_CONTEXT_TOKENS)
+            else cfg.large_context_tokens
         )
         self.large_history_turns = int(
             large_history_turns
             if large_history_turns is not None
-            else os.environ.get("LITE_LARGE_HISTORY_TURNS", DEFAULT_LARGE_HISTORY_TURNS)
+            else cfg.large_history_turns
         )
 
-        chain_raw = (
-            fallback_chain
-            if fallback_chain is not None
-            else parse_fallback_chain(
-                os.environ.get("LITE_FALLBACK_CHAIN", DEFAULT_FALLBACK_CHAIN)
-            )
-        )
-        # If the user only supplied one entry, we still allow it — the
-        # engine will surface an error if a forced cloud call is later
-        # made without credentials.
+        if fallback_chain is not None:
+            chain_raw = list(fallback_chain)
+        else:
+            chain_raw = list(cfg.fallback_chain)
         if not chain_raw:
-            chain_raw = list(parse_fallback_chain(DEFAULT_FALLBACK_CHAIN))
+            chain_raw = list(DEFAULT_FALLBACK_CHAIN)
         self.fallback_chain: list[str] = chain_raw
 
         # Mutable state — survives across route() calls within a single

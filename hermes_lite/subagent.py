@@ -57,7 +57,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from hermes_lite.llm import ChatRequest, chat
-from hermes_lite.orchestrator import ToolLoop
+from hermes_lite.tool_loop import ToolLoop
 from hermes_lite.registry import PluginRegistry, ToolDefinition
 from hermes_lite.tools_builtins import register_builtins as _register_essentials
 
@@ -68,7 +68,14 @@ from hermes_lite.tools_builtins import register_builtins as _register_essentials
 SUBAGENT_TOOL_NAME = "subagent"
 SUBAGENT_MAX_TOOL_CALLS = 6           # hard cap on LLM-driven tool calls
 SUBAGENT_MAX_ITERATIONS = 6           # alias — the child loop's max_iterations
-SUBAGENT_WALL_TIMEOUT_S = float(os.environ.get("HERMES_LITE_SUBAGENT_TIMEOUT", "180"))  # hard wall-clock kill
+def _subagent_wall_timeout() -> float:
+    from hermes_lite.config import get_config
+
+    return float(get_config().subagent_timeout_s)
+
+
+# Back-compat name — resolved at import from defaults; prefer _subagent_wall_timeout()
+SUBAGENT_WALL_TIMEOUT_S = 180.0  # hard wall-clock kill default
 SUBAGENT_DB_PREFIX = "/tmp/lite-sub-"
 
 DEFAULT_SUBAGENT_LOG_PATH = Path.home() / ".hermes_lite" / "subagents.log"
@@ -161,10 +168,9 @@ def _default_subagent_model_id() -> str:
     Anything non-empty goes — the LLM client resolves it via
     ``_pick_client_and_model``.
     """
-    return os.environ.get(
-        "HERMES_LITE_SUBAGENT_MODEL",
-        "local:Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf",
-    )
+    from hermes_lite.config import get_config
+
+    return get_config().subagent_model
 
 
 def _failure(msg: str, sub_id: str, *, terminated_by: str = "crashed") -> dict[str, Any]:
@@ -258,7 +264,7 @@ class SubagentRunner:
     max_tool_calls: int = SUBAGENT_MAX_TOOL_CALLS
     """Hard cap on LLM-driven tool calls within the child loop."""
 
-    timeout_s: float = SUBAGENT_WALL_TIMEOUT_S
+    timeout_s: float = field(default_factory=_subagent_wall_timeout)
     """Wall-clock budget before the run is killed with TimeoutError."""
 
     # -- public API --------------------------------------------------------
@@ -438,7 +444,7 @@ def register_subagent_tool(
     *,
     chat_fn: Callable[[ChatRequest], Any] = chat,
     log_path: Path | str | None = None,
-    timeout_s: float = SUBAGENT_WALL_TIMEOUT_S,
+    timeout_s: float | None = None,
 ) -> ToolDefinition:
     """Register the ``subagent`` tool on *registry* and return its definition.
 

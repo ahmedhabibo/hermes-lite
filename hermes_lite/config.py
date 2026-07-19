@@ -62,8 +62,9 @@ LOCAL_MODEL_DEFAULT = "Qwen2.5-Coder-7B-Instruct-IQ3_XS.gguf"
 CLOUD_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 CLOUD_MODEL_DEFAULT = "z-ai/glm-5.2"
 
-# Fallback chain (cloud-first, used when the primary cloud model fails)
+# Local-first fallback chain (preferred model first)
 DEFAULT_FALLBACK_CHAIN = [
+    f"local:{LOCAL_MODEL_DEFAULT}",
     "z-ai/glm-5.2",
     "minimaxai/minimax-m3",
     "moonshotai/kimi-k2.6",
@@ -75,8 +76,12 @@ DEFAULT_FALLBACK_CHAIN = [
 DEFAULT_RPM = 40
 DEFAULT_MAX_RETRIES = 4
 
-# Router
-DEFAULT_LOCAL_MAX_COMPLEXITY = 0.3
+# Router (local-first: stay local until score exceeds threshold)
+DEFAULT_LOCAL_MAX_COMPLEXITY = 0.7
+DEFAULT_ESCALATE_AFTER_FAILURES = 2
+DEFAULT_LARGE_PROMPT_CHARS = 2_000
+DEFAULT_LARGE_CONTEXT_TOKENS = 4_000
+DEFAULT_LARGE_HISTORY_TURNS = 4
 
 # MoA
 DEFAULT_MOA_TIMEOUT_S = 60.0
@@ -131,6 +136,10 @@ class HermesLiteConfig:
 
     # Router
     local_max_complexity: float = DEFAULT_LOCAL_MAX_COMPLEXITY
+    escalate_after_failures: int = DEFAULT_ESCALATE_AFTER_FAILURES
+    large_prompt_chars: int = DEFAULT_LARGE_PROMPT_CHARS
+    large_context_tokens: int = DEFAULT_LARGE_CONTEXT_TOKENS
+    large_history_turns: int = DEFAULT_LARGE_HISTORY_TURNS
 
     # MoA
     moa_preset: Optional[str] = None
@@ -153,9 +162,26 @@ class HermesLiteConfig:
     # Sandbox
     sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
     sandbox_allowlist: Optional[str] = None
+    sandbox_blocklist: Optional[str] = None
+    sandbox_network: str = "allow"
 
     # Local tools (send tool_choice to local endpoint)
     local_tools_enabled: bool = False
+
+    # Web tools
+    web_search_disabled: bool = False
+    web_fetch_disabled: bool = False
+
+    # Prompts / persona
+    prompt_override: str = ""
+    persona: str = "balanced"
+
+    # WebUI server
+    webui_port: int = 3007
+    webui_host: str = "0.0.0.0"
+
+    # Auth
+    auth_token: str = ""
 
     # Paths
     home_dir: Path = field(default_factory=lambda: Path.home() / ".hermes_lite")
@@ -175,9 +201,9 @@ class HermesLiteConfig:
         return self.home_dir / "config.yaml"
 
     @property
-    def is_standalone(self) -> bool:
-        """Always True in v0.8.0+ — Hermes-Lite is always standalone."""
-        return True
+    def fallback_chain_csv(self) -> str:
+        """Comma-joined fallback chain (legacy env shape)."""
+        return ",".join(self.fallback_chain)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +241,15 @@ def _deep_get(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _env_first(*names: str, default: str = "") -> str:
+    """Return the first non-empty env value among *names*, else *default*."""
+    for name in names:
+        val = os.environ.get(name)
+        if val is not None and str(val).strip() != "":
+            return str(val)
+    return default
+
+
 def _env_str(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
@@ -244,11 +279,14 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     raw = os.environ.get(name, "")
     if not raw:
         return list(default)
-    # Support pipe-separated keys (same convention as llm.py)
     for sep in ("|", ",", ";"):
         if sep in raw:
             return [k.strip() for k in raw.split(sep) if k.strip()]
     return [raw.strip()] if raw.strip() else list(default)
+
+
+def _parse_csv_list(raw: str) -> list[str]:
+    return [p.strip() for p in raw.split(",") if p and p.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -260,12 +298,10 @@ def _build_config() -> HermesLiteConfig:
     """Build a HermesLiteConfig from env vars, optional YAML, and defaults."""
     cfg = HermesLiteConfig()
 
-    # Resolve home dir
     home_env = os.environ.get("HERMES_LITE_HOME", "")
     if home_env:
         cfg.home_dir = Path(home_env).expanduser()
 
-    # Load optional YAML
     yaml_data = _load_yaml(cfg.config_file_path)
 
     # --- Local LLM ---
@@ -288,7 +324,6 @@ def _build_config() -> HermesLiteConfig:
         _deep_get(yaml_data, "cloud", "model", default=CLOUD_MODEL_DEFAULT),
     )
 
-    # API keys: single key or pipe-separated pool
     single_key = os.environ.get(
         "HERMES_LITE_NVIDIA_API_KEY", ""
     ) or os.environ.get("NVIDIA_API_KEY", "")
@@ -305,16 +340,22 @@ def _build_config() -> HermesLiteConfig:
             cfg.cloud_api_key = str(yaml_keys[0])
             cfg.cloud_api_keys = [str(k) for k in yaml_keys]
 
-    # Fallback chain from env or YAML
-    chain_env = os.environ.get("HERMES_LITE_FALLBACK_CHAIN", "")
+    # Prefer HERMES_LITE_FALLBACK_CHAIN; accept legacy LITE_FALLBACK_CHAIN
+    chain_env = _env_first("HERMES_LITE_FALLBACK_CHAIN", "LITE_FALLBACK_CHAIN", default="")
     if chain_env:
-        cfg.fallback_chain = _env_list("HERMES_LITE_FALLBACK_CHAIN", [])
+        cfg.fallback_chain = _parse_csv_list(chain_env)
     else:
         yaml_chain = _deep_get(yaml_data, "cloud", "fallback_chain", default=None)
         if isinstance(yaml_chain, list) and yaml_chain:
             cfg.fallback_chain = [str(m) for m in yaml_chain]
+        else:
+            # Prepend local model to match historical router default chain shape
+            local_entry = f"local:{cfg.local_model}"
+            if cfg.fallback_chain and not cfg.fallback_chain[0].startswith("local:"):
+                cfg.fallback_chain = [local_entry] + list(cfg.fallback_chain)
+            elif not cfg.fallback_chain:
+                cfg.fallback_chain = [local_entry, cfg.cloud_model]
 
-    # --- Rate limiting ---
     cfg.rpm = _env_int(
         "HERMES_LITE_RPM",
         _deep_get(yaml_data, "rate_limit", "rpm", default=DEFAULT_RPM),
@@ -324,13 +365,78 @@ def _build_config() -> HermesLiteConfig:
         _deep_get(yaml_data, "rate_limit", "max_retries", default=DEFAULT_MAX_RETRIES),
     )
 
-    # --- Router ---
-    cfg.local_max_complexity = _env_float(
-        "LITE_LOCAL_MAX_COMPLEXITY",
-        _deep_get(yaml_data, "router", "local_max_complexity", default=DEFAULT_LOCAL_MAX_COMPLEXITY),
+    # Router — HERMES_LITE_* preferred, LITE_* accepted for backward compat
+    cfg.local_max_complexity = float(
+        _env_first(
+            "HERMES_LITE_LOCAL_MAX_COMPLEXITY",
+            "LITE_LOCAL_MAX_COMPLEXITY",
+            default=str(
+                _deep_get(
+                    yaml_data,
+                    "router",
+                    "local_max_complexity",
+                    default=DEFAULT_LOCAL_MAX_COMPLEXITY,
+                )
+            ),
+        )
+    )
+    cfg.escalate_after_failures = int(
+        _env_first(
+            "HERMES_LITE_ESCALATE_AFTER_FAILURES",
+            "LITE_ESCALATE_AFTER_FAILURES",
+            default=str(
+                _deep_get(
+                    yaml_data,
+                    "router",
+                    "escalate_after_failures",
+                    default=DEFAULT_ESCALATE_AFTER_FAILURES,
+                )
+            ),
+        )
+    )
+    cfg.large_prompt_chars = int(
+        _env_first(
+            "HERMES_LITE_LARGE_PROMPT_CHARS",
+            "LITE_LARGE_PROMPT_CHARS",
+            default=str(
+                _deep_get(
+                    yaml_data,
+                    "router",
+                    "large_prompt_chars",
+                    default=DEFAULT_LARGE_PROMPT_CHARS,
+                )
+            ),
+        )
+    )
+    cfg.large_context_tokens = int(
+        _env_first(
+            "HERMES_LITE_LARGE_CONTEXT_TOKENS",
+            "LITE_LARGE_CONTEXT_TOKENS",
+            default=str(
+                _deep_get(
+                    yaml_data,
+                    "router",
+                    "large_context_tokens",
+                    default=DEFAULT_LARGE_CONTEXT_TOKENS,
+                )
+            ),
+        )
+    )
+    cfg.large_history_turns = int(
+        _env_first(
+            "HERMES_LITE_LARGE_HISTORY_TURNS",
+            "LITE_LARGE_HISTORY_TURNS",
+            default=str(
+                _deep_get(
+                    yaml_data,
+                    "router",
+                    "large_history_turns",
+                    default=DEFAULT_LARGE_HISTORY_TURNS,
+                )
+            ),
+        )
     )
 
-    # --- MoA ---
     moa_preset_env = os.environ.get("HERMES_LITE_MOA_PRESET", "")
     yaml_moa_preset = _deep_get(yaml_data, "moa", "preset", default=None)
     cfg.moa_preset = moa_preset_env or yaml_moa_preset or None
@@ -352,19 +458,23 @@ def _build_config() -> HermesLiteConfig:
         _deep_get(yaml_data, "moa", "max_tokens", default=DEFAULT_MOA_MAX_TOKENS),
     )
 
-    # --- Memory ---
-    cfg.memory_max_chars = _env_int(
-        "LITE_MEMORY_MAX_CHARS",
-        _deep_get(yaml_data, "memory", "max_chars", default=DEFAULT_MEMORY_MAX_CHARS),
+    cfg.memory_max_chars = int(
+        _env_first(
+            "HERMES_LITE_MEMORY_MAX_CHARS",
+            "LITE_MEMORY_MAX_CHARS",
+            default=str(
+                _deep_get(
+                    yaml_data, "memory", "max_chars", default=DEFAULT_MEMORY_MAX_CHARS
+                )
+            ),
+        )
     )
 
-    # --- Observability ---
     cfg.max_log_bytes = _env_int(
         "HERMES_LITE_MAX_LOG_BYTES",
         _deep_get(yaml_data, "observability", "max_log_bytes", default=DEFAULT_MAX_LOG_BYTES),
     )
 
-    # --- Subagent ---
     cfg.subagent_timeout_s = _env_float(
         "HERMES_LITE_SUBAGENT_TIMEOUT",
         _deep_get(yaml_data, "subagent", "timeout_s", default=DEFAULT_SUBAGENT_TIMEOUT_S),
@@ -378,17 +488,58 @@ def _build_config() -> HermesLiteConfig:
         _deep_get(yaml_data, "orchestrator", "max_iterations", default=DEFAULT_MAX_ITERATIONS),
     )
 
-    # --- Sandbox ---
     cfg.sandbox_timeout = _env_int(
         "HERMES_LITE_SANDBOX_TIMEOUT",
         _deep_get(yaml_data, "sandbox", "timeout", default=DEFAULT_SANDBOX_TIMEOUT),
     )
-    cfg.sandbox_allowlist = os.environ.get("HERMES_LITE_SANDBOX_ALLOWLIST", None)
+    allow = os.environ.get("HERMES_LITE_SANDBOX_ALLOWLIST")
+    cfg.sandbox_allowlist = allow if allow else None
+    block = os.environ.get("HERMES_LITE_SANDBOX_BLOCKLIST")
+    cfg.sandbox_blocklist = block if block else None
+    cfg.sandbox_network = _env_str(
+        "HERMES_LITE_SANDBOX_NETWORK",
+        _deep_get(yaml_data, "sandbox", "network", default="allow"),
+    )
 
-    # --- Local tools ---
     cfg.local_tools_enabled = _env_bool(
         "HERMES_LITE_LOCAL_TOOLS",
         _deep_get(yaml_data, "local", "tools_enabled", default=False),
+    )
+
+    # Web tools
+    cfg.web_search_disabled = _env_bool(
+        "HERMES_LITE_WEB_SEARCH_DISABLED",
+        _deep_get(yaml_data, "tools", "web_search_disabled", default=False),
+    )
+    cfg.web_fetch_disabled = _env_bool(
+        "HERMES_LITE_WEB_FETCH_DISABLED",
+        _deep_get(yaml_data, "tools", "web_fetch_disabled", default=False),
+    )
+
+    # Prompts / persona
+    cfg.prompt_override = _env_str(
+        "HERMES_LITE_PROMPT_OVERRIDE",
+        _deep_get(yaml_data, "prompts", "override", default=""),
+    )
+    cfg.persona = _env_str(
+        "HERMES_LITE_PERSONA",
+        _deep_get(yaml_data, "prompts", "persona", default="balanced"),
+    )
+
+    # WebUI
+    cfg.webui_port = _env_int(
+        "HERMES_LITE_WEBUI_PORT",
+        _deep_get(yaml_data, "webui", "port", default=3007),
+    )
+    cfg.webui_host = _env_str(
+        "HERMES_LITE_WEBUI_HOST",
+        _deep_get(yaml_data, "webui", "host", default="0.0.0.0"),
+    )
+
+    # Auth token
+    cfg.auth_token = _env_str(
+        "HERMES_LITE_AUTH_TOKEN",
+        _deep_get(yaml_data, "auth", "token", default=""),
     )
 
     return cfg
@@ -435,6 +586,10 @@ __all__ = [
     "DEFAULT_RPM",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_LOCAL_MAX_COMPLEXITY",
+    "DEFAULT_ESCALATE_AFTER_FAILURES",
+    "DEFAULT_LARGE_PROMPT_CHARS",
+    "DEFAULT_LARGE_CONTEXT_TOKENS",
+    "DEFAULT_LARGE_HISTORY_TURNS",
     "DEFAULT_MOA_TIMEOUT_S",
     "DEFAULT_MOA_REF_TEMP",
     "DEFAULT_MOA_AGG_TEMP",
