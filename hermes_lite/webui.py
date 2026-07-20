@@ -215,7 +215,7 @@ header .info { margin-left: auto; font-size: 0.8rem; color: #8b949e; }
 </div>
 <div class="input-bar">
     <input type="text" id="prompt" placeholder="Type your message..." autocomplete="off" autofocus />
-    <div class="stream-toggle"><input type="checkbox" id="stream-mode" checked /> Stream</div>
+    <div class="stream-toggle"><input type="checkbox" id="stream-mode" checked title="Streaming mode does not support tool calls — use batch mode for tool-requiring prompts" /> Stream</div>
     <button id="send" onclick="sendMsg()">Send</button>
 </div>
 <script>

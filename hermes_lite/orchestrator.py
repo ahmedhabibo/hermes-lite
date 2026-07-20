@@ -413,12 +413,13 @@ class HermesOrchestrator:
         This method routes the prompt, builds the system prompt + memory
         context, and streams the model output via ``chat_stream``.
 
-        **Tool calls are NOT handled in streaming mode** — this is a
-        direct-answer path for simple Q&A. Prompts that require tool
-        calls should use ``_handle_prompt`` (batch) instead. The WebUI
-        ``stream`` message type uses this; if the LLM emits tool_calls
-        during streaming, the generated text up to that point is yielded
-        and the stream ends (the client can retry via batch).
+        **Tool calls are silently dropped during streaming; only text
+        deltas are yielded.** This is a direct-answer path for simple
+        Q&A. Prompts that require tool calls should use
+        ``_handle_prompt`` (batch) instead. The WebUI ``stream`` message
+        type uses this; if the LLM emits tool_calls during streaming,
+        the generated text up to that point is yielded and the stream
+        ends (the client can retry via batch).
 
         Commands, direct-tool calls, and active MoA presets are delegated
         to ``_handle_prompt`` so they execute correctly.
